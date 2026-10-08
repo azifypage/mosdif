@@ -323,36 +323,58 @@ def _rtx_node(job: dict):
         raise RuntimeError(f"RTX Video Super Resolution node could not be loaded: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(spec.name, None)
+        raise
     return module
 
 
 def _rtx_fit(job: dict, images, gen_w: int, gen_h: int, crop_w: int, crop_h: int):
-    """Upscale the H3 frames with RTX Video Super Resolution, then fit the crop."""
+    """Upscale the H3 frames with RTX Video Super Resolution, then fit the crop.
+    
+    Falls back gracefully to high-quality Lanczos upscale if RTX/nvvfx is not supported.
+    """
     import comfy.utils
 
     cover = max(crop_w / gen_w, crop_h / gen_h, 2.0)
     scale = min(4.0, cover)
-    print(
-        f"RTX upscale {gen_w}x{gen_h} by {scale:.2f}, then fit {crop_w}x{crop_h}",
-        flush=True,
-    )
     _free_other_models()
-    module = _rtx_node(job)
-    upscaled = module.RTXVideoSuperResolution.execute(
-        images,
-        {"resize_type": module.UpscaleType.SCALE_BY, "scale": scale, "width": 0, "height": 0},
-        "ULTRA",
-    )[0]
-    fitted = comfy.utils.common_upscale(
-        upscaled.movedim(-1, 1),
-        crop_w,
-        crop_h,
-        "lanczos",
-        "disabled",
-    ).movedim(1, -1)
-    del upscaled
-    return fitted
+    try:
+        module = _rtx_node(job)
+        print(
+            f"RTX upscale {gen_w}x{gen_h} by {scale:.2f}, then fit {crop_w}x{crop_h}",
+            flush=True,
+        )
+        upscaled = module.RTXVideoSuperResolution.execute(
+            images,
+            {"resize_type": module.UpscaleType.SCALE_BY, "scale": scale, "width": 0, "height": 0},
+            "ULTRA",
+        )[0]
+        fitted = comfy.utils.common_upscale(
+            upscaled.movedim(-1, 1),
+            crop_w,
+            crop_h,
+            "lanczos",
+            "disabled",
+        ).movedim(1, -1)
+        del upscaled
+        return fitted
+    except Exception as exc:
+        print(
+            f"Notice: RTX Super Resolution unavailable ({exc}). Using direct Lanczos upscale to {crop_w}x{crop_h}.",
+            flush=True,
+        )
+        fitted = comfy.utils.common_upscale(
+            images.movedim(-1, 1),
+            crop_w,
+            crop_h,
+            "lanczos",
+            "disabled",
+        ).movedim(1, -1)
+        return fitted
+
 
 
 def _read_crop(frame, crop: list[int]):
