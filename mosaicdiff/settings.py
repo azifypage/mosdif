@@ -11,6 +11,7 @@ from mosaicdiff.paths import (
     LOCAL_DEFAULTS,
     MODEL_LABELS,
     default_output_dir,
+    find_model_file,
     is_frozen,
     models_dir,
     settings_path,
@@ -41,11 +42,24 @@ class Settings:
         if is_frozen() and key in BUNDLED_NAMES:
             return models_dir() / BUNDLED_NAMES[key]
         chosen = (self.paths.get(key) or "").strip()
+        if chosen and Path(chosen).exists():
+            return Path(chosen)
+
+        if key in BUNDLED_NAMES:
+            c_root = None
+            if "comfy_root" in self.paths:
+                c_root = Path(self.paths["comfy_root"])
+            elif "comfy_root" in LOCAL_DEFAULTS:
+                c_root = LOCAL_DEFAULTS["comfy_root"]
+            found = find_model_file(key, c_root)
+            if found is not None:
+                return found
+            name = BUNDLED_NAMES.get(key)
+            if name is not None:
+                return models_dir() / name
+
         if chosen:
             return Path(chosen)
-        name = BUNDLED_NAMES.get(key)
-        if name is not None:
-            return models_dir() / name
         return LOCAL_DEFAULTS[key]
 
     def missing(self) -> list[tuple[str, Path]]:

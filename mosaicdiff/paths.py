@@ -70,6 +70,52 @@ def models_dir() -> Path:
     return install_dir() / "models"
 
 
+ALTERNATIVE_FILENAMES = {
+    "vsr": ["basicvsr.pth", "lada_mosaic_restoration_model_generic_v1.2.pth"],
+    "detector": ["rfdetr.onnx", "rfdetr-v6.onnx", "rfdetr-v6-large.onnx"],
+    "unet": ["unet.safetensors", "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors"],
+    "lora": ["lora.safetensors"],
+    "clip": ["clip.safetensors", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"],
+    "vae": ["vae.safetensors", "minimax_h3_video_vae_fp16.safetensors"],
+}
+
+
+def find_model_file(key: str, comfy_root: Path | None = None) -> Path | None:
+    """Search for model file across mosdif/models, MosaicDiff/models, and ComfyUI folders."""
+    candidate_dirs: list[Path] = [
+        models_dir(),
+        Path("/content/mosdif/models"),
+        Path("/content/MosaicDiff/models"),
+    ]
+    if comfy_root and comfy_root.is_dir():
+        if key == "unet":
+            candidate_dirs.extend([
+                comfy_root / "models" / "diffusion_models",
+                comfy_root / "models" / "unet",
+            ])
+        elif key == "clip":
+            candidate_dirs.extend([
+                comfy_root / "models" / "text_encoders",
+                comfy_root / "models" / "clip",
+            ])
+        elif key == "vae":
+            candidate_dirs.append(comfy_root / "models" / "vae")
+        elif key == "lora":
+            candidate_dirs.append(comfy_root / "models" / "loras")
+
+    names = ALTERNATIVE_FILENAMES.get(key, [BUNDLED_NAMES.get(key, "")])
+    for folder in candidate_dirs:
+        if not folder.is_dir():
+            continue
+        for name in names:
+            if not name:
+                continue
+            candidate = folder / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def nodes_dir() -> Path:
     """Custom Comfy nodes shipped with MosaicDiff, not taken from the Comfy install."""
     if is_frozen():
@@ -82,6 +128,9 @@ def default_output_dir() -> Path:
 
 
 def bundled_model(key: str) -> Path | None:
+    found = find_model_file(key)
+    if found is not None:
+        return found
     name = BUNDLED_NAMES.get(key)
     if name is None:
         return None
