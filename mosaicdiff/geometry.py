@@ -81,7 +81,7 @@ def split_samples(frame_indices: list[int]) -> list[list[int]]:
 
 def generation_size(width: int, height: int, side: int) -> tuple[int, int]:
     """Keep the crop's shape at the pixel count of a ``side`` square."""
-    side = max(512, min(1280, int(side)))
+    side = max(384, min(1280, int(side)))
     megapixels = (side / 1024) ** 2
     total = megapixels * 1024 * 1024
     scale = math.sqrt(total / (width * height))

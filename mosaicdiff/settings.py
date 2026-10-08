@@ -32,8 +32,9 @@ PATH_KEYS = (
 @dataclass
 class Settings:
     output_dir: str = ""
-    h3_seconds: int = 5
-    h3_resolution: int = 800
+    h3_seconds: int = 4
+    h3_resolution: int = 512
+    h3_steps: int = 4
     compare: bool = False
     paths: dict[str, str] = field(default_factory=dict)
 
@@ -75,6 +76,7 @@ class Settings:
             "output_dir": self.output_dir,
             "h3_seconds": self.h3_seconds,
             "h3_resolution": self.h3_resolution,
+            "h3_steps": self.h3_steps,
             "compare": self.compare,
             "paths": self.paths,
         }
@@ -97,13 +99,15 @@ class Settings:
             return settings
         settings = cls(
             output_dir=str(data.get("output_dir") or ""),
-            h3_seconds=int(data.get("h3_seconds") or 5),
-            h3_resolution=int(data.get("h3_resolution") or 800),
+            h3_seconds=int(data.get("h3_seconds") or 4),
+            h3_resolution=int(data.get("h3_resolution") or 512),
+            h3_steps=int(data.get("h3_steps") or 4),
             compare=False,
             paths={key: str(value) for key, value in dict(data.get("paths") or {}).items()},
         )
         settings.h3_seconds = min(15, max(1, settings.h3_seconds))
-        settings.h3_resolution = min(1280, max(512, settings.h3_resolution - settings.h3_resolution % 32))
+        settings.h3_resolution = min(1280, max(384, settings.h3_resolution - settings.h3_resolution % 32))
+        settings.h3_steps = min(16, max(2, settings.h3_steps))
         if is_frozen():
             settings.output_dir = str(default_output_dir())
             for key in BUNDLED_NAMES:

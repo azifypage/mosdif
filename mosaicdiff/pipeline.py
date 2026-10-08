@@ -274,7 +274,7 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
             "video_vae": str(settings.resolved("vae")),
             "prompt": PROMPT,
             "seed": 0,
-            "steps": 8,
+            "steps": int(getattr(settings, "h3_steps", 4)),
             "video": str(vsr_path),
             "windows": specs,
         }

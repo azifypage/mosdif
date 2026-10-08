@@ -77,6 +77,7 @@ def process_video_web(
     video_file,
     h3_seconds: int,
     h3_resolution: int,
+    h3_steps: int,
     progress=gr.Progress(track_tqdm=True),
 ):
     if not video_file:
@@ -101,11 +102,12 @@ def process_video_web(
     settings = Settings.load()
     settings.h3_seconds = int(h3_seconds)
     settings.h3_resolution = int(h3_resolution)
+    settings.h3_steps = int(h3_steps)
     settings.compare = False
     settings.output_dir = str(out_dir)
 
     log_cb(f"Memulai restorasi video: {src_path.name}")
-    log_cb(f"Pengaturan: H3 Window={settings.h3_seconds}s, Resolution={settings.h3_resolution}px")
+    log_cb(f"Pengaturan: H3 Window={settings.h3_seconds}s, Resolution={settings.h3_resolution}px, Steps={settings.h3_steps}")
 
     try:
         discover_comfy(settings, log_cb)
@@ -178,22 +180,30 @@ def create_ui() -> gr.Blocks:
                         )
 
                         with gr.Group():
-                            gr.Markdown("#### Parameter Restorasi")
-                            h3_sec = gr.Slider(
-                                minimum=1,
-                                maximum=15,
-                                value=settings.h3_seconds,
+                            gr.Markdown("#### Parameter Restorasi & Kecepatan")
+                            h3_steps_slider = gr.Slider(
+                                minimum=2,
+                                maximum=8,
+                                value=getattr(settings, "h3_steps", 4),
                                 step=1,
-                                label="H3 Sample Window (Detik)",
-                                info="Panjang sampel video per inference MiniMax H3",
+                                label="⚡ Sampling Steps (Kecepatan)",
+                                info="4 steps = Turbo Super Cepat (Rekomendasi). 8 steps = Standar (2x lebih lama).",
                             )
                             h3_res = gr.Slider(
-                                minimum=512,
-                                maximum=1280,
+                                minimum=384,
+                                maximum=1024,
                                 value=settings.h3_resolution,
                                 step=32,
-                                label="H3 Generation Resolution (Pixels)",
-                                info="Resolusi pemrosesan patch sensor",
+                                label="📐 H3 Generation Resolution (Pixels)",
+                                info="512px = Sangat Cepat (Rekomendasi). 800px = Berat.",
+                            )
+                            h3_sec = gr.Slider(
+                                minimum=1,
+                                maximum=10,
+                                value=settings.h3_seconds,
+                                step=1,
+                                label="⏱️ H3 Sample Window (Detik)",
+                                info="Panjang sampel video per inference (3-4s lebih ringan & cepat).",
                             )
 
                         with gr.Row():
@@ -243,7 +253,7 @@ def create_ui() -> gr.Blocks:
         # Event Handlers
         btn_start.click(
             fn=process_video_web,
-            inputs=[video_input, h3_sec, h3_res],
+            inputs=[video_input, h3_sec, h3_res, h3_steps_slider],
             outputs=[file_download, notification_box, logs_box],
         )
 
