@@ -152,11 +152,17 @@ def _load(job: dict):
 
 
 def _bundled_node(job: dict, folder: str, filename: str) -> Path:
+    candidates = []
     nodes = str(job.get("nodes_dir") or "").strip()
     if nodes:
-        path = Path(nodes) / folder / filename
-        if path.is_file():
-            return path
+        candidates.append(Path(nodes) / folder / filename)
+    candidates.append(Path(__file__).resolve().parents[1] / "comfy_nodes" / folder / filename)
+    candidates.append(Path("/content/mosdif/comfy_nodes") / folder / filename)
+    candidates.append(Path("/content/MosaicDiff/comfy_nodes") / folder / filename)
+    candidates.append(Path(job["comfy_root"]) / "custom_nodes" / folder / filename)
+    for c in candidates:
+        if c.is_file():
+            return c
     return Path(job["comfy_root"]) / "custom_nodes" / folder / filename
 
 

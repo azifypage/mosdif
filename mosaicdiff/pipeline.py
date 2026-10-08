@@ -265,8 +265,21 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
                 }
             )
             log(f"Sample {number + 1}: {len(indices)} frames, context {context}")
+        comfy_root = settings.resolved("comfy_root")
+        c_nodes = comfy_root / "custom_nodes"
+        src_nodes = nodes_dir()
+        if c_nodes.is_dir() and src_nodes.is_dir():
+            import shutil
+            for n_dir in src_nodes.iterdir():
+                target = c_nodes / n_dir.name
+                if n_dir.is_dir() and not target.exists():
+                    try:
+                        shutil.copytree(str(n_dir), str(target))
+                    except Exception:
+                        pass
+
         job = {
-            "comfy_root": str(settings.resolved("comfy_root")),
+            "comfy_root": str(comfy_root),
             "nodes_dir": str(nodes_dir()),
             "unet": str(settings.resolved("unet")),
             "lora": str(settings.resolved("lora")),
