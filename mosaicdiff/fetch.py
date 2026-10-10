@@ -25,8 +25,8 @@ _REMOTE = {
         "3bfd69ffc21518bde80ba6b61696d51efd0a398b",
     ),
     "unet": (
-        "ChrisColeTech/LTX-2.5-uncensored-v1.1-FP8",
-        "split/diffusion_models/ltx25_uncensored_v1.1-Q4_K_M.gguf",
+        "Stuubs/Stubelius_Remix_Ltx2.5",
+        "ltx2.5-Stubelius_remix_v1_Q4_K_S.gguf",
         None,
     ),
     "clip": (
