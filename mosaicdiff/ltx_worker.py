@@ -35,6 +35,23 @@ def _boot() -> None:
     except ImportError:
         pass
 
+    try:
+        import server
+        if hasattr(server, "PromptServer") and getattr(server.PromptServer, "instance", None) is None:
+            class DummyPromptServer:
+                def __init__(self):
+                    self.routes = None
+                    self.app = None
+                    self.loop = None
+                    self.sockets = {}
+                    self.supports = []
+                def send_sync(self, *a, **k): pass
+                def add_routes(self, *a, **k): pass
+                def add_on_prompt_handler(self, *a, **k): pass
+            server.PromptServer.instance = DummyPromptServer()
+    except Exception:
+        pass
+
     if not hasattr(cli_args, "enables_dynamic_vram") or not cli_args.enables_dynamic_vram():
         return
     try:
@@ -90,43 +107,25 @@ def _load_unet(job: dict):
     if model_path.endswith(".gguf"):
         print(f"Loading GGUF Diffusion Model: {Path(model_path).name}", flush=True)
 
-        # 1. Try initializing ComfyUI extra/custom nodes
-        import nodes
-        import inspect
-        import asyncio
-
+        # Register model folder in folder_paths so get_full_path can locate it
         try:
-            if hasattr(nodes, "init_extra_nodes"):
-                if inspect.iscoroutinefunction(nodes.init_extra_nodes):
-                    asyncio.run(nodes.init_extra_nodes())
-                else:
-                    nodes.init_extra_nodes()
-            elif hasattr(nodes, "init_custom_nodes"):
-                if inspect.iscoroutinefunction(nodes.init_custom_nodes):
-                    asyncio.run(nodes.init_custom_nodes())
-                else:
-                    nodes.init_custom_nodes()
-        except Exception as exc:
-            print(f"Notice: init_extra_nodes: {exc}", flush=True)
-
-        if hasattr(nodes, "NODE_CLASS_MAPPINGS") and "UnetLoaderGGUF" in nodes.NODE_CLASS_MAPPINGS:
-            loader_cls = nodes.NODE_CLASS_MAPPINGS["UnetLoaderGGUF"]
-            return loader_cls().load_unet(model_path)[0]
-
-        # 2. Try direct import from custom_nodes
-        try:
-            from custom_nodes.ComfyUI_GGUF.nodes import UnetLoaderGGUF
-            return UnetLoaderGGUF().load_unet(model_path)[0]
+            import folder_paths
+            model_parent = str(Path(model_path).parent)
+            for folder_key in ("unet", "diffusion_models", "unet_gguf"):
+                try:
+                    folder_paths.add_model_folder_path(folder_key, model_parent)
+                except Exception:
+                    pass
         except Exception:
             pass
 
-        # 3. Dynamic package import with proper submodule_search_locations for relative imports
+        # 1. Direct package import of ComfyUI-GGUF
         import importlib.util
         comfy_root = Path(job.get("comfy_root", ""))
         candidate_dirs = [
             comfy_root / "custom_nodes" / "ComfyUI-GGUF",
-            comfy_root / "custom_nodes" / "comfyui-gguf",
             comfy_root / "custom_nodes" / "ComfyUI_GGUF",
+            comfy_root / "custom_nodes" / "comfyui-gguf",
             comfy_root / "custom_nodes" / "comfyui_gguf",
             comfy_root / "custom_nodes" / "comfyui-gguf-loader",
             Path(__file__).resolve().parents[1] / "comfy_nodes" / "ComfyUI-GGUF",
@@ -135,21 +134,60 @@ def _load_unet(job: dict):
             init_file = c_dir / "__init__.py"
             if init_file.is_file():
                 try:
-                    pkg_name = f"comfy_gguf_{abs(hash(str(c_dir)))}"
-                    spec = importlib.util.spec_from_file_location(
-                        pkg_name,
-                        init_file,
-                        submodule_search_locations=[str(c_dir)],
-                    )
-                    if spec and spec.loader:
-                        mod = importlib.util.module_from_spec(spec)
-                        sys.modules[pkg_name] = mod
-                        spec.loader.exec_module(mod)
-                        if hasattr(mod, "NODE_CLASS_MAPPINGS") and "UnetLoaderGGUF" in mod.NODE_CLASS_MAPPINGS:
-                            loader_cls = mod.NODE_CLASS_MAPPINGS["UnetLoaderGGUF"]
+                    pkg_name = "ComfyUI_GGUF_ext"
+                    if pkg_name not in sys.modules:
+                        spec = importlib.util.spec_from_file_location(
+                            pkg_name,
+                            init_file,
+                            submodule_search_locations=[str(c_dir)],
+                        )
+                        if spec and spec.loader:
+                            mod = importlib.util.module_from_spec(spec)
+                            sys.modules[pkg_name] = mod
+                            spec.loader.exec_module(mod)
+                    else:
+                        mod = sys.modules[pkg_name]
+
+                    # A. Try UnetLoaderGGUF node class
+                    if hasattr(mod, "NODE_CLASS_MAPPINGS") and "UnetLoaderGGUF" in mod.NODE_CLASS_MAPPINGS:
+                        loader_cls = mod.NODE_CLASS_MAPPINGS["UnetLoaderGGUF"]
+                        try:
+                            return loader_cls().load_unet(Path(model_path).name)[0]
+                        except Exception:
+                            pass
+                        try:
                             return loader_cls().load_unet(model_path)[0]
+                        except Exception:
+                            pass
+
+                    # B. Direct state dict load via nodes submodule
+                    nodes_mod = sys.modules.get(f"{pkg_name}.nodes")
+                    if nodes_mod and hasattr(nodes_mod, "GGMLOps") and hasattr(nodes_mod, "gguf_sd_loader"):
+                        ops = nodes_mod.GGMLOps()
+                        sd = nodes_mod.gguf_sd_loader(model_path)
+                        import comfy.sd
+                        return comfy.sd.load_diffusion_model_state_dict(sd, model_options={"custom_operations": ops})
                 except Exception as exc:
-                    print(f"Notice: loading {c_dir.name} package failed: {exc}", flush=True)
+                    print(f"Notice: loading {c_dir.name} directly failed: {exc}", flush=True)
+
+        # 2. Try direct import from custom_nodes if available
+        try:
+            from custom_nodes.ComfyUI_GGUF.nodes import UnetLoaderGGUF
+            try:
+                return UnetLoaderGGUF().load_unet(Path(model_path).name)[0]
+            except Exception:
+                return UnetLoaderGGUF().load_unet(model_path)[0]
+        except Exception:
+            pass
+
+        # 3. Check registered nodes.NODE_CLASS_MAPPINGS as fallback
+        import nodes
+        if hasattr(nodes, "NODE_CLASS_MAPPINGS") and "UnetLoaderGGUF" in nodes.NODE_CLASS_MAPPINGS:
+            loader_cls = nodes.NODE_CLASS_MAPPINGS["UnetLoaderGGUF"]
+            try:
+                return loader_cls().load_unet(Path(model_path).name)[0]
+            except Exception:
+                return loader_cls().load_unet(model_path)[0]
 
         err_msg = (
             f"GGUF loader (ComfyUI-GGUF) tidak dapat dimuat untuk file '{Path(model_path).name}'. "
@@ -160,7 +198,6 @@ def _load_unet(job: dict):
         import comfy.sd
         print(f"Loading Diffusion Model: {Path(model_path).name}", flush=True)
         return comfy.sd.load_diffusion_model(model_path, model_options={})
-
 def _load_clip(job: dict):
     import comfy.sd
     clip_path = str(job["clip"])
