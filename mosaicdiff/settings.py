@@ -35,6 +35,8 @@ class Settings:
     h3_resolution: int = 512
     h3_steps: int = 4
     compare: bool = False
+    prompt: str = ""
+    seed: int = 42
     paths: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -101,6 +103,8 @@ class Settings:
             "h3_resolution": self.h3_resolution,
             "h3_steps": self.h3_steps,
             "compare": self.compare,
+            "prompt": self.prompt,
+            "seed": self.seed,
             "paths": self.paths,
         }
         settings_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -126,6 +130,8 @@ class Settings:
             h3_resolution=int(data.get("h3_resolution") or 512),
             h3_steps=int(data.get("h3_steps") or 4),
             compare=False,
+            prompt=str(data.get("prompt") or ""),
+            seed=int(data.get("seed") or 42),
             paths={key: str(value) for key, value in dict(data.get("paths") or {}).items()},
         )
         settings.h3_seconds = min(15, max(1, settings.h3_seconds))

@@ -28,7 +28,11 @@ from mosaicdiff.settings import Settings
 from mosaicdiff.videoio import VideoWriter, copy_audio, open_capture
 from mosaicdiff.vsr import restore_squares
 
-PROMPT = "[VISUAL]: Restore the vulva or penis in the reference video with natural skin texture and high anatomical detail, seamlessly matching the surrounding area. [SOUNDS]: unscored"
+DEFAULT_PROMPT = (
+    "high quality, photorealistic, natural skin texture, realistic detailed anatomy, "
+    "seamless blend with surrounding video, 4k resolution, realistic lighting"
+)
+PROMPT = DEFAULT_PROMPT
 CHUNK = 90
 OVERLAP = 4
 
@@ -56,7 +60,13 @@ def process_video(
     log,
     progress,
     cancel,
+    prompt: str | None = None,
+    seed: int | None = None,
 ) -> Path:
+    if prompt is not None:
+        settings.prompt = str(prompt).strip()
+    if seed is not None:
+        settings.seed = int(seed)
     missing = settings.missing()
     if missing:
         listed = ", ".join(label for label, _path in missing)
@@ -279,6 +289,11 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
                         pass
 
         lora_target = settings.resolved("lora")
+        user_prompt = (getattr(settings, "prompt", "") or "").strip()
+        effective_prompt = user_prompt if user_prompt else DEFAULT_PROMPT
+        effective_seed = int(getattr(settings, "seed", 42))
+        log(f"LTX-2.5 Prompt: '{effective_prompt}' | Seed: {effective_seed}")
+
         job = {
             "comfy_root": str(comfy_root),
             "nodes_dir": str(nodes_dir()),
@@ -286,8 +301,8 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
             "lora": str(lora_target) if lora_target.is_file() else None,
             "clip": str(settings.resolved("clip")),
             "video_vae": str(settings.resolved("vae")),
-            "prompt": PROMPT,
-            "seed": 0,
+            "prompt": effective_prompt,
+            "seed": effective_seed,
             "steps": int(getattr(settings, "ltx_steps", getattr(settings, "h3_steps", 4))),
             "video": str(vsr_path),
             "windows": specs,

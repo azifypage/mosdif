@@ -214,6 +214,18 @@ def main() -> None:
         default=None,
         help="Override path executable Python ComfyUI (misal: /usr/bin/python3).",
     )
+    parser.add_argument(
+        "-p",
+        "--prompt",
+        default=None,
+        help="Prompt teks deskriptif untuk inpainting LTX-2.5.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed acak untuk inpainting LTX-2.5 (default: 42).",
+    )
 
     args = parser.parse_args()
 
@@ -229,6 +241,10 @@ def main() -> None:
         settings.ltx_resolution = min(1280, max(384, snapped))
     if args.seconds is not None:
         settings.ltx_seconds = max(1, min(15, args.seconds))
+    if args.prompt:
+        settings.prompt = args.prompt.strip()
+    if args.seed is not None:
+        settings.seed = args.seed
     settings.save()
 
     # Mode 1: Check models

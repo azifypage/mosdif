@@ -564,12 +564,13 @@ def _restore_window(loaded, job: dict, window: dict, crops: dict | None = None) 
     latent = _pin_reference_border(loaded, frames, width, height, window.get("mask"))
 
     steps = int(job.get("steps", 4))
-    print(f"Sampling {steps} steps (LTX-2.5 Turbo)", flush=True)
+    seed = int(job.get("seed", 42))
+    print(f"Sampling {steps} steps (LTX-2.5 Turbo, seed {seed})", flush=True)
 
     guider = loaded["guider"].execute(loaded["base_model"], positive)[0]
     sigmas = loaded["scheduler"].execute(loaded["base_model"], "simple", steps, 1.0)[0]
     sampler = loaded["sampler"].execute("euler")[0]
-    noise = loaded["noise"].execute(int(job.get("seed", 0)))[0]
+    noise = loaded["noise"].execute(seed)[0]
     sampled = loaded["sample"].execute(noise, guider, sampler, sigmas, latent)[0]
 
     # Handle NestedTensor or pure tensor output
