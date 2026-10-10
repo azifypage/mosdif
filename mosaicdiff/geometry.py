@@ -4,33 +4,36 @@ from __future__ import annotations
 
 import math
 
-H3_FPS = 24.0
-MIN_FRAMES = 5
-MAX_SAMPLE_FRAMES = 362
-FRAME_MOD = 17
-FRAME_REM = 5
+LTX_FPS = 24.0
+H3_FPS = LTX_FPS
+MIN_FRAMES = 9
+MAX_SAMPLE_FRAMES = 241
+FRAME_MOD = 8
+FRAME_REM = 1
 RESTORATION_SIZE = 256
 
 
 def align_down(count: int) -> int:
-    """Largest count <= ``count`` with ``count % 17 == 5``, or 0 when that is under 5."""
+    """Largest count <= ``count`` with ``(count - 1) % 8 == 0``, or 0 when that is under 9."""
     if count < MIN_FRAMES:
         return 0
-    drop = (count % FRAME_MOD - FRAME_REM) % FRAME_MOD
+    drop = (count - FRAME_REM) % FRAME_MOD
     aligned = count - drop
     return aligned if aligned >= MIN_FRAMES else 0
 
 
 def align_up(count: int) -> int:
+    """Smallest count >= ``count`` with ``(count - 1) % 8 == 0``."""
     count = max(MIN_FRAMES, int(count))
-    while count % FRAME_MOD != FRAME_REM:
-        count += 1
+    rem = (count - FRAME_REM) % FRAME_MOD
+    if rem != 0:
+        count += (FRAME_MOD - rem)
     return count
 
 
 def context_frames(seconds: float) -> int:
     seconds = min(15.0, max(1.0, float(seconds)))
-    return min(align_up(round(seconds * H3_FPS)), MAX_SAMPLE_FRAMES)
+    return min(align_up(round(seconds * LTX_FPS)), MAX_SAMPLE_FRAMES)
 
 
 def fit_context(seconds: float, sample_frames: int) -> tuple[int, int]:
@@ -39,7 +42,7 @@ def fit_context(seconds: float, sample_frames: int) -> tuple[int, int]:
     fitted = align_down(min(available, requested, MAX_SAMPLE_FRAMES))
     if fitted < MIN_FRAMES:
         fitted = align_down(available)
-    overlap = 22 if fitted > 22 else 0
+    overlap = 16 if fitted > 24 else 0
     if overlap >= fitted:
         overlap = 0
     return fitted, overlap

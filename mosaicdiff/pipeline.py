@@ -28,7 +28,7 @@ from mosaicdiff.settings import Settings
 from mosaicdiff.videoio import VideoWriter, copy_audio, open_capture
 from mosaicdiff.vsr import restore_squares
 
-PROMPT = "Restore the vulva or penis the reference video"
+PROMPT = "[VISUAL]: Restore the vulva or penis in the reference video with natural skin texture and high anatomical detail, seamlessly matching the surrounding area. [SOUNDS]: unscored"
 CHUNK = 90
 OVERLAP = 4
 
@@ -103,14 +103,14 @@ def process_video(
         torch.cuda.empty_cache()
 
     crop = stable_crop([box for box in grown if box is not None], width, height)
-    log(f"H3 crop {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]}")
+    log(f"LTX-2.5 crop {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]}")
     try:
         _h3(source, vsr_path, destination, settings, crop, grown, fps, log, progress, cancel)
     except Cancelled:
         vsr_path.unlink(missing_ok=True)
         raise
     except Exception:
-        log(f"H3 stopped. The BasicVSR++ video is still at {vsr_path.name}")
+        log(f"LTX-2.5 stopped. The BasicVSR++ video is still at {vsr_path.name}")
         raise
     vsr_path.unlink(missing_ok=True)
     progress(1.0, "Done")
@@ -241,10 +241,10 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
     sampled = [first + index for index in span]
     windows = split_samples(sampled)
     if not windows:
-        raise RuntimeError("The restored section is shorter than 5 frames at 24 fps")
+        raise RuntimeError("The restored section is shorter than 9 frames at 24 fps")
     gen_w, gen_h = generation_size(crop[2] - crop[0], crop[3] - crop[1], settings.h3_resolution)
-    log(f"MiniMax H3, {len(windows)} sample(s), {gen_w}x{gen_h}")
-    progress(0.58, "MiniMax H3")
+    log(f"LTX-2.5 Diffusion pass, {len(windows)} sample(s), {gen_w}x{gen_h}")
+    progress(0.58, "LTX-2.5")
     with tempfile.TemporaryDirectory(prefix="mosaicdiff-", dir=str(destination.parent)) as temp_name:
         temp = Path(temp_name)
         specs = []
@@ -278,16 +278,17 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
                     except Exception:
                         pass
 
+        lora_target = settings.resolved("lora")
         job = {
             "comfy_root": str(comfy_root),
             "nodes_dir": str(nodes_dir()),
             "unet": str(settings.resolved("unet")),
-            "lora": str(settings.resolved("lora")),
+            "lora": str(lora_target) if lora_target.is_file() else None,
             "clip": str(settings.resolved("clip")),
             "video_vae": str(settings.resolved("vae")),
             "prompt": PROMPT,
             "seed": 0,
-            "steps": int(getattr(settings, "h3_steps", 4)),
+            "steps": int(getattr(settings, "ltx_steps", getattr(settings, "h3_steps", 4))),
             "video": str(vsr_path),
             "windows": specs,
         }

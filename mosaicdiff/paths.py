@@ -11,10 +11,10 @@ APP_DIR_NAME = "MosaicDiff"
 BUNDLED_NAMES = {
     "vsr": "basicvsr.pth",
     "detector": "rfdetr.onnx",
-    "unet": "unet.safetensors",
+    "unet": "ltx25_uncensored_v1.1-Q4_K_M.gguf",
     "lora": "lora.safetensors",
-    "clip": "clip.safetensors",
-    "vae": "vae.safetensors",
+    "clip": "gemma4_12b_ltx25_uncensored-int8.safetensors",
+    "vae": "ltx25_uncensored_video_vae.safetensors",
 }
 
 # ComfyUI stays an install. Weight files are resolved from models\ next to the program.
@@ -26,10 +26,10 @@ LOCAL_DEFAULTS = {
 MODEL_LABELS = {
     "vsr": "BasicVSR++ checkpoint",
     "detector": "Mosaic detector",
-    "unet": "Eros Max",
-    "lora": "H3 LoRA (place this yourself)",
-    "clip": "H3 text encoder",
-    "vae": "H3 video VAE",
+    "unet": "LTX-2.5 Uncensored DiT (Q4_K_M GGUF)",
+    "lora": "Optional LoRA (Baked into GGUF by default)",
+    "clip": "Gemma-4 LTX-2.5 Text Encoder",
+    "vae": "LTX-2.5 Video VAE",
     "comfy_python": "ComfyUI Python",
     "comfy_root": "ComfyUI folder",
 }
@@ -47,8 +47,16 @@ def install_dir() -> Path:
 
 def worker_script() -> Path:
     if is_frozen():
-        return Path(getattr(sys, "_MEIPASS")) / "mosaicdiff" / "h3_worker.py"
-    return Path(__file__).resolve().parent / "h3_worker.py"
+        for cand in ("ltx_worker.py", "h3_worker.py"):
+            p = Path(getattr(sys, "_MEIPASS")) / "mosaicdiff" / cand
+            if p.is_file():
+                return p
+        return Path(getattr(sys, "_MEIPASS")) / "mosaicdiff" / "ltx_worker.py"
+    for cand in ("ltx_worker.py", "h3_worker.py"):
+        p = Path(__file__).resolve().parent / cand
+        if p.is_file():
+            return p
+    return Path(__file__).resolve().parent / "ltx_worker.py"
 
 
 def settings_path() -> Path:
@@ -73,10 +81,33 @@ def models_dir() -> Path:
 ALTERNATIVE_FILENAMES = {
     "vsr": ["basicvsr.pth", "lada_mosaic_restoration_model_generic_v1.2.pth"],
     "detector": ["rfdetr.onnx", "rfdetr-v6.onnx", "rfdetr-v6-large.onnx"],
-    "unet": ["unet.safetensors", "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors"],
+    "unet": [
+        "ltx25_uncensored_v1.1-Q4_K_M.gguf",
+        "ltx25_uncensored_v1.1-Q6_K.gguf",
+        "ltx25_uncensored_v1.1-Q8_0.gguf",
+        "ltx25_uncensored_v1.1-fp8_scaled.safetensors",
+        "ltx25_uncensored_v1.1-fp8.safetensors",
+        "ltx25_uncensored_v1.1-int8.safetensors",
+        "unet.gguf",
+        "unet.safetensors",
+        "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+    ],
     "lora": ["lora.safetensors"],
-    "clip": ["clip.safetensors", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"],
-    "vae": ["vae.safetensors", "minimax_h3_video_vae_fp16.safetensors"],
+    "clip": [
+        "gemma4_12b_ltx25_uncensored-int8.safetensors",
+        "gemma4_12b_ltx25_uncensored-Q4_K_M.gguf",
+        "gemma4_12b_ltx25_uncensored-Q6_K.gguf",
+        "gemma4_12b_ltx25_uncensored-Q8_0.gguf",
+        "gemma4-12b_with-proj-ltx-uncensored-int8.safetensors",
+        "clip.safetensors",
+        "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    ],
+    "vae": [
+        "ltx25_uncensored_video_vae.safetensors",
+        "ltx-2.5-video-vae-bf16.safetensors",
+        "vae.safetensors",
+        "minimax_h3_video_vae_fp16.safetensors",
+    ],
 }
 
 

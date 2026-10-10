@@ -21,7 +21,6 @@ PATH_KEYS = (
     "vsr",
     "detector",
     "unet",
-    "lora",
     "clip",
     "vae",
     "comfy_python",
@@ -37,6 +36,30 @@ class Settings:
     h3_steps: int = 4
     compare: bool = False
     paths: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ltx_seconds(self) -> int:
+        return self.h3_seconds
+
+    @ltx_seconds.setter
+    def ltx_seconds(self, value: int):
+        self.h3_seconds = value
+
+    @property
+    def ltx_resolution(self) -> int:
+        return self.h3_resolution
+
+    @ltx_resolution.setter
+    def ltx_resolution(self, value: int):
+        self.h3_resolution = value
+
+    @property
+    def ltx_steps(self) -> int:
+        return self.h3_steps
+
+    @ltx_steps.setter
+    def ltx_steps(self, value: int):
+        self.h3_steps = value
 
     def resolved(self, key: str) -> Path:
         # The shipped exe only reads weights from the models folder beside it.

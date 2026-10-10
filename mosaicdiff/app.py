@@ -73,7 +73,7 @@ class MosaicDiffApp(ctk.CTk):
         ctk.CTkLabel(header, text="MosaicDiff", text_color=TEXT, font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w")
         ctk.CTkLabel(
             header,
-            text="BasicVSR++ finds the mosaic. Eros Max repaints it.",
+            text="BasicVSR++ finds the mosaic. LTX-2.5 Uncensored repaints it.",
             text_color=MUTED,
             font=ctk.CTkFont(size=14),
         ).pack(anchor="w", pady=(2, 0))
@@ -102,18 +102,18 @@ class MosaicDiffApp(ctk.CTk):
             self.output_entry.configure(state="disabled")
             browse.configure(state="disabled")
 
-        ctk.CTkLabel(options, text="H3 length", text_color=MUTED).grid(row=1, column=0, sticky="w", padx=16, pady=8)
+        ctk.CTkLabel(options, text="LTX-2.5 length", text_color=MUTED).grid(row=1, column=0, sticky="w", padx=16, pady=8)
         self.seconds = ctk.CTkSlider(options, from_=1, to=15, number_of_steps=14, command=self._on_seconds, button_color=ACCENT, progress_color=ACCENT)
         self.seconds.grid(row=1, column=1, sticky="ew", padx=8, pady=8)
-        self.seconds.set(self.settings.h3_seconds)
-        self.seconds_label = ctk.CTkLabel(options, text=f"{self.settings.h3_seconds}s", text_color=TEXT, width=70)
+        self.seconds.set(self.settings.ltx_seconds)
+        self.seconds_label = ctk.CTkLabel(options, text=f"{self.settings.ltx_seconds}s", text_color=TEXT, width=70)
         self.seconds_label.grid(row=1, column=2, padx=(0, 16))
 
-        ctk.CTkLabel(options, text="H3 resolution", text_color=MUTED).grid(row=2, column=0, sticky="w", padx=16, pady=8)
+        ctk.CTkLabel(options, text="LTX-2.5 resolution", text_color=MUTED).grid(row=2, column=0, sticky="w", padx=16, pady=8)
         self.resolution = ctk.CTkSlider(options, from_=512, to=1280, number_of_steps=24, command=self._on_resolution, button_color=ACCENT, progress_color=ACCENT)
         self.resolution.grid(row=2, column=1, sticky="ew", padx=8, pady=8)
-        self.resolution.set(self.settings.h3_resolution)
-        self.resolution_label = ctk.CTkLabel(options, text=str(self.settings.h3_resolution), text_color=TEXT, width=70)
+        self.resolution.set(self.settings.ltx_resolution)
+        self.resolution_label = ctk.CTkLabel(options, text=str(self.settings.ltx_resolution), text_color=TEXT, width=70)
         self.resolution_label.grid(row=2, column=2, padx=(0, 16), pady=(8, 14))
 
         actions = ctk.CTkFrame(self, fg_color=BG)
@@ -198,9 +198,9 @@ class MosaicDiffApp(ctk.CTk):
             self.settings.output_dir = str(default_output_dir())
         else:
             self.settings.output_dir = self.output_entry.get().strip()
-        self.settings.h3_seconds = int(round(self.seconds.get()))
+        self.settings.ltx_seconds = int(round(self.seconds.get()))
         snapped = int(round(float(self.resolution.get()) / 32) * 32)
-        self.settings.h3_resolution = min(1280, max(512, snapped))
+        self.settings.ltx_resolution = min(1280, max(512, snapped))
         self.settings.compare = False
         self.settings.save()
         return self.settings
@@ -339,7 +339,7 @@ class MosaicDiffApp(ctk.CTk):
         elif key == "comfy_python":
             chosen = filedialog.askopenfilename(title=MODEL_LABELS[key], filetypes=(("Python", "python.exe"), ("All files", "*.*")))
         else:
-            chosen = filedialog.askopenfilename(title=MODEL_LABELS[key], filetypes=(("Model", "*.pth *.engine *.safetensors"), ("All files", "*.*")))
+            chosen = filedialog.askopenfilename(title=MODEL_LABELS[key], filetypes=(("Model", "*.pth *.engine *.safetensors *.gguf"), ("All files", "*.*")))
         if chosen:
             entry.delete(0, "end")
             entry.insert(0, chosen)

@@ -25,18 +25,18 @@ _REMOTE = {
         "3bfd69ffc21518bde80ba6b61696d51efd0a398b",
     ),
     "unet": (
-        "TenStrip/10Eros-Max",
-        "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
+        "ChrisColeTech/LTX-2.5-uncensored-v1.1-FP8",
+        "split/diffusion_models/ltx25_uncensored_v1.1-Q4_K_M.gguf",
         None,
     ),
     "clip": (
-        "Comfy-Org/MiniMax-H3",
-        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "ChrisColeTech/LTX-2.5-uncensored-v1.1-FP8",
+        "split/text_encoders/gemma4_12b_ltx25_uncensored-int8.safetensors",
         None,
     ),
     "vae": (
-        "Comfy-Org/MiniMax-H3",
-        "vae/minimax_h3_video_vae_fp16.safetensors",
+        "ChrisColeTech/LTX-2.5-uncensored-v1.1-FP8",
+        "split/vae/ltx25_uncensored_video_vae.safetensors",
         None,
     ),
 }
@@ -215,10 +215,33 @@ def _use_detector_model(settings: Settings, log) -> None:
         return
     destination = models_dir() / BUNDLED_NAMES["detector"]
     if not destination.is_file():
-        raise FetchError(
-            f"Place the mosaic detector at {destination}. "
-            "That file is rfdetr-v6.onnx. MosaicDiff runs it directly, so no TensorRT engine is required."
-        )
+        if shutil.which("7z"):
+            log("rfdetr.onnx tidak ditemukan. Mengunduh detector dari release GitHub...")
+            archive = models_dir() / "_MosaicDiff.7z"
+            import subprocess
+            import urllib.request
+            url = "https://github.com/dotaku22/MosaicDiff/releases/download/v1.0.1/MosaicDiff-windows.7z"
+            try:
+                urllib.request.urlretrieve(url, archive)
+                subprocess.run(
+                    ["7z", "e", str(archive), "models/rfdetr.onnx", f"-o{models_dir()}", "-y"],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                )
+                archive.unlink(missing_ok=True)
+                log("Berhasil mengekstrak rfdetr.onnx.")
+            except Exception as err:
+                log(f"Ekstraksi otomatis detector gagal: {err}")
+                archive.unlink(missing_ok=True)
+
+        if not destination.is_file():
+            raise FetchError(
+                f"File detector mozaik belum ditemukan di: {destination}\n"
+                "Silakan letakkan file 'rfdetr.onnx' di folder models/.\n"
+                "Di Google Colab / Linux, jalankan perintah:\n"
+                "  wget -q https://github.com/dotaku22/MosaicDiff/releases/download/v1.0.1/MosaicDiff-windows.7z && \\\n"
+                "  7z e MosaicDiff-windows.7z models/rfdetr.onnx -omodels/ -y && rm MosaicDiff-windows.7z"
+            )
     settings.paths["detector"] = str(destination)
     settings.save()
     log(f"Using detector model {destination.name}")
@@ -240,9 +263,10 @@ def ensure_weights(settings: Settings, log, cancel: threading.Event, progress=No
         settings.save()
 
     lora = settings.resolved("lora")
-    if not lora.is_file():
-        expected = models_dir() / BUNDLED_NAMES["lora"]
-        raise FetchError(f"Place your LoRA at {expected}")
+    if lora.is_file():
+        log(f"Using optional LoRA: {lora.name}")
+    else:
+        log("Base LTX-2.5 model has baked-in Eros10 & DMD LoRAs. No extra LoRA required.")
 
     _use_detector_model(settings, log)
 

@@ -59,6 +59,8 @@ def check_models_status() -> str:
             size_mb = resolved_path.stat().st_size / (1024 * 1024)
             size_str = f"{size_mb / 1024:.2f} GB" if size_mb >= 1024 else f"{size_mb:.1f} MB"
             lines.append(f"-  **{name}**: `{resolved_path}` ({size_str})")
+        elif key == "lora":
+            lines.append(f"- ℹ️ **{name}**: *Opsional (Sudah terpasang di dalam GGUF checkpoint)*")
         else:
             lines.append(f"- ❌ **{name}**: *Belum ditemukan* (`{resolved_path}`)")
     
@@ -165,7 +167,7 @@ def create_ui() -> gr.Blocks:
         gr.Markdown(
             """
             #  mosdif Web Service (Google Colab)
-            **Video Mosaic Restoration Pipeline (BasicVSR++ & MiniMax H3)**
+            **Video Mosaic Restoration Pipeline (BasicVSR++ & LTX-2.5 Uncensored Turbo GGUF)**
             """
         )
         sys_info = gr.Markdown(get_system_info())
@@ -183,27 +185,27 @@ def create_ui() -> gr.Blocks:
                             gr.Markdown("#### Parameter Restorasi & Kecepatan")
                             h3_steps_slider = gr.Slider(
                                 minimum=2,
-                                maximum=8,
-                                value=getattr(settings, "h3_steps", 4),
+                                maximum=12,
+                                value=getattr(settings, "ltx_steps", getattr(settings, "h3_steps", 4)),
                                 step=1,
                                 label="⚡ Sampling Steps (Kecepatan)",
-                                info="4 steps = Turbo Super Cepat (Rekomendasi). 8 steps = Standar (2x lebih lama).",
+                                info="4 steps = Turbo Super Cepat (Rekomendasi). 8 steps = Standar.",
                             )
                             h3_res = gr.Slider(
                                 minimum=384,
                                 maximum=1024,
                                 value=settings.h3_resolution,
                                 step=32,
-                                label="📐 H3 Generation Resolution (Pixels)",
-                                info="512px = Sangat Cepat (Rekomendasi). 800px = Berat.",
+                                label="📐 LTX-2.5 Generation Resolution (Pixels)",
+                                info="512px = Sangat Cepat & Tajam (Rekomendasi). 768px = Resolusi Tinggi.",
                             )
                             h3_sec = gr.Slider(
                                 minimum=1,
                                 maximum=10,
                                 value=settings.h3_seconds,
                                 step=1,
-                                label="⏱️ H3 Sample Window (Detik)",
-                                info="Panjang sampel video per inference (3-4s lebih ringan & cepat).",
+                                label="⏱️ LTX-2.5 Sample Window (Detik)",
+                                info="Panjang sampel video per window (3-4s optimal).",
                             )
 
                         with gr.Row():
