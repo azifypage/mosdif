@@ -280,12 +280,50 @@ def _watch_progress() -> None:
     comfy.utils.set_progress_bar_global_hook(hook)
 
 
+def _ensure_5d_latent(tensor, torch=None):
+    """Normalize a latent tensor to strictly 5D [Batch=1, Channels=128, Time, Height, Width] for LTX Video VAE."""
+    if hasattr(tensor, "unbind") and not (torch is not None and isinstance(tensor, torch.Tensor)):
+        try:
+            tensor = tensor.unbind()[0]
+        except Exception:
+            pass
+
+    if not hasattr(tensor, "dim"):
+        return tensor
+
+    if tensor.dim() == 5:
+        # If batch dim is not 1 and first dim is 128 (channels), unsqueeze batch dim 0
+        if tensor.shape[0] == 128 and tensor.shape[1] != 128:
+            return tensor.unsqueeze(0)
+        return tensor
+
+    if tensor.dim() == 4:
+        # Case 1: [Channels=128, T, H, W] -> unsqueeze batch dim 0 -> [1, 128, T, H, W]
+        if tensor.shape[0] == 128:
+            return tensor.unsqueeze(0)
+        # Case 2: [Batch=1, Channels=128, H, W] -> single-frame video: [1, 128, 1, H, W]
+        elif tensor.shape[1] == 128 and tensor.shape[0] == 1:
+            return tensor.unsqueeze(2)
+        # Case 3: [T, Channels=128, H, W] -> [1, 128, T, H, W]
+        elif tensor.shape[1] == 128:
+            return tensor.permute(1, 0, 2, 3).unsqueeze(0)
+        else:
+            return tensor.unsqueeze(0)
+
+    if tensor.dim() == 3:
+        # [Channels=128, H, W] -> [1, 128, 1, H, W]
+        return tensor.unsqueeze(0).unsqueeze(2)
+
+    return tensor
+
+
 def _watch_vae(vae) -> None:
     encode = vae.encode
     decode = vae.decode
 
     def encode_logged(pixel_samples, *args, **kwargs):
-        print(f"VAE encode ({_gpu_line()})", flush=True)
+        shape_str = f" shape {list(pixel_samples.shape)}" if hasattr(pixel_samples, "shape") else ""
+        print(f"VAE encode ({_gpu_line()}){shape_str}", flush=True)
         _free_other_models()
         started = time.perf_counter()
         out = encode(pixel_samples, *args, **kwargs)
@@ -293,7 +331,10 @@ def _watch_vae(vae) -> None:
         return out
 
     def decode_logged(samples, *args, **kwargs):
-        print(f"VAE decode ({_gpu_line()})", flush=True)
+        import torch
+        samples = _ensure_5d_latent(samples, torch)
+        shape_str = f" shape {list(samples.shape)}" if hasattr(samples, "shape") else ""
+        print(f"VAE decode ({_gpu_line()}){shape_str}", flush=True)
         _free_other_models()
         started = time.perf_counter()
         out = decode(samples, *args, **kwargs)
@@ -345,9 +386,10 @@ def _pin_reference_border(loaded, frames, width: int, height: int, mask_path: st
     if hasattr(encoded, "samples"):
         encoded = encoded.samples
 
-    lat_t = encoded.shape[2] if encoded.dim() == 5 else encoded.shape[1]
-    lat_h = encoded.shape[-2]
-    lat_w = encoded.shape[-1]
+    encoded = _ensure_5d_latent(encoded, torch)
+    lat_t = encoded.shape[2]
+    lat_h = encoded.shape[3]
+    lat_w = encoded.shape[4]
 
     mask = _denoise_mask(torch, mask_path, lat_t, lat_h, lat_w)
     mask = mask.to(device=encoded.device, dtype=torch.float32)
@@ -357,7 +399,7 @@ def _pin_reference_border(loaded, frames, width: int, height: int, mask_path: st
         "noise_mask": mask,
     }
 
-    held = float((mask[0, 0, 0] <= 0).float().mean())
+    held = float((mask <= 0).float().mean())
     print(f"LTX noise mask holds {held:.0%} of area (preserves border & unmasked region)", flush=True)
     return latent
 
@@ -532,13 +574,21 @@ def _restore_window(loaded, job: dict, window: dict, crops: dict | None = None) 
 
     # Handle NestedTensor or pure tensor output
     samples_tensor = sampled["samples"]
-    if hasattr(samples_tensor, "unbind"):
-        try:
-            samples_tensor = samples_tensor.unbind()[0]
-        except Exception:
-            pass
+    samples_tensor = _ensure_5d_latent(samples_tensor, torch)
+    print(f"Samples tensor shape for decode: {list(samples_tensor.shape)}", flush=True)
 
-    images = loaded["decode"].decode(loaded["vae"], {"samples": samples_tensor})[0]
+    try:
+        images = loaded["decode"].decode(loaded["vae"], {"samples": samples_tensor})[0]
+    except Exception as exc:
+        print(f"Notice: nodes.VAEDecode failed ({exc}), falling back to direct vae.decode", flush=True)
+        images = loaded["vae"].decode(samples_tensor)
+
+    # If decoded video is 5D [1, T, H, W, C], remove batch dim to get [T, H, W, C]
+    if hasattr(images, "dim"):
+        if images.dim() == 5:
+            images = images.squeeze(0)
+        elif images.dim() == 3:
+            images = images.unsqueeze(0)
 
     if images.shape[0] != length:
         # Trim or pad if subtle rounding mismatch occurred

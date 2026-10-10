@@ -354,7 +354,7 @@ def _run_comfy(python: Path, job_path: Path, log, cancel) -> None:
         raise
     code = process.wait()
     if code != 0:
-        raise RuntimeError(f"MiniMax H3 process exited with status {code}")
+        raise RuntimeError(f"LTX-2.5 diffusion process exited with status {code}")
 
 
 def _write_output(vsr_path, destination, pastes, crop, output_fps, source_fps, frame_count: int) -> None:
