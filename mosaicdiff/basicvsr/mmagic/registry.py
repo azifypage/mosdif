@@ -34,7 +34,15 @@ from mmengine.registry import VISBACKENDS as MMENGINE_VISBACKENDS
 from mmengine.registry import VISUALIZERS as MMENGINE_VISUALIZERS
 from mmengine.registry import \
     WEIGHT_INITIALIZERS as MMENGINE_WEIGHT_INITIALIZERS
-from mmengine.registry import Registry
+from mmengine.registry import Registry as _MMENGINE_Registry
+
+def Registry(*args, **kwargs):
+    parent = kwargs.get('parent')
+    scope = kwargs.get('scope', 'mosaicdiff.basicvsr.mmagic')
+    if parent is not None and hasattr(parent, '_children') and scope in parent._children:
+        return parent._children[scope]
+    return _MMENGINE_Registry(*args, **kwargs)
+
 
 #######################################################################
 #                           jasna.mmagic                            #
