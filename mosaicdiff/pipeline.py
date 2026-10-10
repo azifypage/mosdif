@@ -63,6 +63,7 @@ def process_video(
     prompt: str | None = None,
     seed: int | None = None,
     denoise: float | None = None,
+    **kwargs,
 ) -> Path:
     if prompt is not None:
         settings.prompt = str(prompt).strip()
