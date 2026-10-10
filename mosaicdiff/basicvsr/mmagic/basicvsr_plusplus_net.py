@@ -288,7 +288,7 @@ class SecondOrderDeformableAlignment(ModulatedDeformConv2d):
     def __init__(self, *args, **kwargs):
         self.max_residue_magnitude = kwargs.pop('max_residue_magnitude', 10)
 
-        super(SecondOrderDeformableAlignment, self).__init__(*args, **kwargs)
+        ModulatedDeformConv2d.__init__(self, *args, **kwargs)
 
         self.conv_offset = nn.Sequential(
             nn.Conv2d(3 * self.out_channels + 4, self.out_channels, 3, 1, 1),

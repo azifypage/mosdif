@@ -270,7 +270,7 @@ class PSNRLoss(nn.Module):
     """
 
     def __init__(self, loss_weight: float = 1.0, toY: bool = False) -> None:
-        super(PSNRLoss, self).__init__()
+        nn.Module.__init__(self)
         self.loss_weight = loss_weight
         import numpy as np
         self.scale = 10 / np.log(10)

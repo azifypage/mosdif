@@ -18,7 +18,7 @@ class ModulatedDeformConv2d(nn.Module):
                  groups=1,
                  deform_groups=1,
                  bias=True):
-        super(ModulatedDeformConv2d, self).__init__()
+        nn.Module.__init__(self)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
