@@ -52,54 +52,12 @@ def _boot() -> None:
     except Exception:
         pass
 
-    if not hasattr(cli_args, "enables_dynamic_vram") or not cli_args.enables_dynamic_vram():
-        return
-    try:
-        import comfy_aimdo.control
-
-        headroom = None if cli_args.args.reserve_vram is None else int(cli_args.args.reserve_vram * 1024**3)
-        try:
-            comfy_aimdo.control.init(
-                simple_vram_headroom=headroom,
-                nvml_pressure=not getattr(cli_args.args, "disable_nvml_pressure", False),
-            )
-        except TypeError:
-            try:
-                comfy_aimdo.control.init(simple_vram_headroom=headroom)
-            except TypeError:
-                comfy_aimdo.control.init()
-    except Exception:
-        pass
+    return
 
 
 def _enable_dynamic_vram() -> None:
-    """Use ComfyUI's dynamic weight loader for fast GPU paging."""
-    try:
-        import comfy.cli_args as cli_args
-        import comfy.memory_management
-        import comfy.model_management
-        import comfy.model_patcher
-        import comfy_aimdo.control
-
-        args = cli_args.args
-        supported = comfy.model_management.is_nvidia() or (
-            comfy.model_management.is_amd() and comfy.model_management.rocm_version >= (7, 14)
-        )
-        if not (getattr(args, "enable_dynamic_vram", False) or (cli_args.enables_dynamic_vram() and supported)):
-            print("Dynamic VRAM off", flush=True)
-            return
-        devices = list(comfy.model_management.get_all_torch_devices())
-        extra = int(args.vram_headroom * 1024**3)
-        try:
-            ready = comfy_aimdo.control.init_devices((device.index, extra) for device in devices)
-        except TypeError:
-            ready = comfy_aimdo.control.init_devices(device.index for device in devices)
-        if ready:
-            comfy.model_patcher.CoreModelPatcher = comfy.model_patcher.ModelPatcherDynamic
-            comfy.memory_management.aimdo_enabled = True
-            print("Dynamic VRAM enabled", flush=True)
-    except Exception as exc:
-        print(f"Dynamic VRAM notice: {exc}", flush=True)
+    """Native ComfyUI model management handles GPU/CPU offloading automatically."""
+    pass
 
 
 def _load_unet(job: dict):
