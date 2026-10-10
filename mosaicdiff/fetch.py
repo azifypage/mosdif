@@ -26,7 +26,7 @@ _REMOTE = {
     ),
     "unet": (
         "Stuubs/Stubelius_Remix_Ltx2.5",
-        "ltx2.5-Stubelius_remix_v1_Q4_K_S.gguf",
+        "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",
         None,
     ),
     "clip": (

@@ -11,7 +11,7 @@ APP_DIR_NAME = "MosaicDiff"
 BUNDLED_NAMES = {
     "vsr": "basicvsr.pth",
     "detector": "rfdetr.onnx",
-    "unet": "ltx2.5-Stubelius_remix_v1_Q4_K_S.gguf",
+    "unet": "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",
     "lora": "lora.safetensors",
     "clip": "gemma4_12b_ltx25_uncensored-int8.safetensors",
     "vae": "ltx25_uncensored_video_vae.safetensors",
@@ -82,8 +82,8 @@ ALTERNATIVE_FILENAMES = {
     "vsr": ["basicvsr.pth", "lada_mosaic_restoration_model_generic_v1.2.pth"],
     "detector": ["rfdetr.onnx", "rfdetr-v6.onnx", "rfdetr-v6-large.onnx"],
     "unet": [
-        "ltx2.5-Stubelius_remix_v1_Q4_K_S.gguf",
         "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",
+        "ltx2.5-Stubelius_remix_v1_Q4_K_S.gguf",
         "ltx2.5-Stubelius_remix_beta2_int8_convrot.safetensors",
         "ltx25StubeliusRemix_beta2Int8.safetensors",
         "ltx2.5-Stubelius_remix_v1_bf16.safetensors",
