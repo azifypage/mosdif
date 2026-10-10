@@ -406,18 +406,25 @@ def _pin_reference_border(loaded, frames, width: int, height: int, mask_path: st
 
 def _denoise_mask(torch, mask_path: str | None, frames: int, height: int, width: int):
     import cv2
+    import numpy as np
 
     if mask_path and Path(mask_path).is_file():
         image = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
     else:
         image = None
     if image is None:
-        border = max(1, min(height, width) // 10)
-        mask = torch.ones((1, 1, frames, height, width), dtype=torch.float32)
-        mask[:, :, :, :border, :] = 0
-        mask[:, :, :, -border:, :] = 0
-        mask[:, :, :, :, :border] = 0
-        mask[:, :, :, :, -border:] = 0
+        border_y = max(2, height // 10)
+        border_x = max(2, width // 10)
+        plane = np.ones((height, width), dtype=np.float32)
+        for y in range(border_y):
+            factor = float(y / border_y)
+            plane[y, :] *= factor
+            plane[height - 1 - y, :] *= factor
+        for x in range(border_x):
+            factor = float(x / border_x)
+            plane[:, x] *= factor
+            plane[:, width - 1 - x] *= factor
+        mask = torch.from_numpy(plane).view(1, 1, 1, height, width).expand(1, 1, frames, height, width).contiguous()
         return mask
     small = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
     plane = torch.from_numpy(small.astype("float32") / 255.0).view(1, 1, 1, height, width)
@@ -563,12 +570,13 @@ def _restore_window(loaded, job: dict, window: dict, crops: dict | None = None) 
 
     latent = _pin_reference_border(loaded, frames, width, height, window.get("mask"))
 
-    steps = int(job.get("steps", 4))
+    steps = int(job.get("steps", 6))
     seed = int(job.get("seed", 42))
-    print(f"Sampling {steps} steps (LTX-2.5 Turbo, seed {seed})", flush=True)
+    denoise = float(job.get("denoise", 0.40))
+    print(f"Sampling {steps} steps (LTX-2.5 Turbo Refiner, denoise {denoise:.2f}, seed {seed})", flush=True)
 
     guider = loaded["guider"].execute(loaded["base_model"], positive)[0]
-    sigmas = loaded["scheduler"].execute(loaded["base_model"], "simple", steps, 1.0)[0]
+    sigmas = loaded["scheduler"].execute(loaded["base_model"], "simple", steps, denoise)[0]
     sampler = loaded["sampler"].execute("euler")[0]
     noise = loaded["noise"].execute(seed)[0]
     sampled = loaded["sample"].execute(noise, guider, sampler, sigmas, latent)[0]

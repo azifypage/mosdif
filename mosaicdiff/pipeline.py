@@ -29,8 +29,8 @@ from mosaicdiff.videoio import VideoWriter, copy_audio, open_capture
 from mosaicdiff.vsr import restore_squares
 
 DEFAULT_PROMPT = (
-    "high quality, photorealistic, natural skin texture, realistic detailed anatomy, "
-    "seamless blend with surrounding video, 4k resolution, realistic lighting"
+    "high quality, natural skin texture, sharp focus, 4k photorealistic, "
+    "seamless natural detail, realistic lighting"
 )
 PROMPT = DEFAULT_PROMPT
 CHUNK = 90
@@ -62,11 +62,14 @@ def process_video(
     cancel,
     prompt: str | None = None,
     seed: int | None = None,
+    denoise: float | None = None,
 ) -> Path:
     if prompt is not None:
         settings.prompt = str(prompt).strip()
     if seed is not None:
         settings.seed = int(seed)
+    if denoise is not None:
+        settings.denoise = float(denoise)
     missing = settings.missing()
     if missing:
         listed = ", ".join(label for label, _path in missing)
@@ -292,7 +295,9 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
         user_prompt = (getattr(settings, "prompt", "") or "").strip()
         effective_prompt = user_prompt if user_prompt else DEFAULT_PROMPT
         effective_seed = int(getattr(settings, "seed", 42))
-        log(f"LTX-2.5 Prompt: '{effective_prompt}' | Seed: {effective_seed}")
+        effective_denoise = float(getattr(settings, "denoise", 0.40))
+        log(f"LTX-2.5 Refiner: Denoise={effective_denoise:.2f} | Steps={settings.ltx_steps} | Seed={effective_seed}")
+        log(f"LTX-2.5 Prompt: '{effective_prompt}'")
 
         job = {
             "comfy_root": str(comfy_root),
@@ -304,6 +309,7 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
             "prompt": effective_prompt,
             "seed": effective_seed,
             "steps": int(getattr(settings, "ltx_steps", getattr(settings, "h3_steps", 4))),
+            "denoise": effective_denoise,
             "video": str(vsr_path),
             "windows": specs,
         }

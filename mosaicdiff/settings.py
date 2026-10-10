@@ -37,6 +37,7 @@ class Settings:
     compare: bool = False
     prompt: str = ""
     seed: int = 42
+    denoise: float = 0.40
     paths: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -105,6 +106,7 @@ class Settings:
             "compare": self.compare,
             "prompt": self.prompt,
             "seed": self.seed,
+            "denoise": self.denoise,
             "paths": self.paths,
         }
         settings_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -132,6 +134,7 @@ class Settings:
             compare=False,
             prompt=str(data.get("prompt") or ""),
             seed=int(data.get("seed") or 42),
+            denoise=float(data.get("denoise") or 0.40),
             paths={key: str(value) for key, value in dict(data.get("paths") or {}).items()},
         )
         settings.h3_seconds = min(15, max(1, settings.h3_seconds))

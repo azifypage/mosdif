@@ -226,6 +226,13 @@ def main() -> None:
         default=None,
         help="Seed acak untuk inpainting LTX-2.5 (default: 42).",
     )
+    parser.add_argument(
+        "-d",
+        "--denoise",
+        type=float,
+        default=None,
+        help="Kekuatan denoise/refinement terhadap referensi BasicVSR++ (0.2-0.6, default: 0.40).",
+    )
 
     args = parser.parse_args()
 
@@ -245,6 +252,8 @@ def main() -> None:
         settings.prompt = args.prompt.strip()
     if args.seed is not None:
         settings.seed = args.seed
+    if args.denoise is not None:
+        settings.denoise = max(0.1, min(1.0, float(args.denoise)))
     settings.save()
 
     # Mode 1: Check models
