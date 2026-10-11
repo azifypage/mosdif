@@ -79,17 +79,34 @@ def stop_comfy_daemon(
     """Stop running ComfyUI daemon so it can refresh and re-index models."""
     if not is_comfy_running(host, port):
         return
-    log_cb("Restarting ComfyUI daemon to index newly available models...")
+    log_cb("Menghentikan ComfyUI daemon untuk re-indexing model...")
     if sys.platform != "win32":
         try:
-            subprocess.run(["pkill", "-9", "-f", "ComfyUI/main.py"], stderr=subprocess.DEVNULL)
+            subprocess.run(f"fuser -k -9 {port}/tcp 2>/dev/null || true", shell=True)
+            subprocess.run(["pkill", "-9", "-f", "main.py"], stderr=subprocess.DEVNULL)
         except Exception:
             pass
-        try:
-            subprocess.run(["fuser", "-k", "-9", f"{port}/tcp"], stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-    time.sleep(2.0)
+    time.sleep(2.5)
+
+
+def is_model_indexed_by_comfy(
+    class_type: str,
+    input_name: str,
+    model_name: str,
+    host: str = "127.0.0.1",
+    port: int = 8188,
+) -> bool:
+    """Check if ComfyUI's object_info API lists model_name for a given node class."""
+    url = f"http://{host}:{port}/object_info/{class_type}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "MosaicDiff-Runner"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        inputs = data.get(class_type, {}).get("input", {}).get("required", {})
+        choices = inputs.get(input_name, [[]])[0]
+        return model_name in choices
+    except Exception:
+        return False
 
 
 def ensure_bfs_models(
@@ -442,6 +459,26 @@ def run_comfy_workflow(
     cancel_event=None,
 ) -> Path:
     """Submit prompt to ComfyUI API, stream progress, and wait for generated output video."""
+    # 0. Self-Healing Model Check: Pastikan seluruh file bobot BFS tersedia di ComfyUI/models/
+    has_second_pass = any(
+        n.get("class_type") == "SaveVideo" and "Second Pass" in n.get("_meta", {}).get("title", "")
+        for n in prompt_dict.values()
+    )
+    needed_restart = ensure_bfs_models(
+        comfy_root=comfy_root,
+        enable_second_pass=has_second_pass,
+        log_cb=log_cb,
+    )
+
+    # Verifikasi apakah ComfyUI daemon sudah mengindeks model video VAE
+    if is_comfy_running(host, port):
+        if needed_restart or not is_model_indexed_by_comfy("VAELoader", "vae_name", "ltx-2.5-video-vae-bf16.safetensors", host, port):
+            log_cb("Sinkronisasi model ke ComfyUI daemon (restart untuk re-indexing)...")
+            stop_comfy_daemon(host=host, port=port, log_cb=log_cb)
+            start_comfy_daemon(comfy_root=comfy_root, host=host, port=port, log_cb=log_cb)
+    else:
+        start_comfy_daemon(comfy_root=comfy_root, host=host, port=port, log_cb=log_cb)
+
     client_id = str(uuid.uuid4())
     url = f"http://{host}:{port}/prompt"
 
