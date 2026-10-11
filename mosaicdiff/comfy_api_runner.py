@@ -360,6 +360,28 @@ def build_ltx_sigmas(steps: int) -> str:
     return ", ".join(f"{s:.6f}".rstrip("0").rstrip(".") for s in sigmas)
 
 
+def normalize_aspect_ratio(val: str, default: str = "16:9 (Widescreen)") -> str:
+    """Map any user aspect ratio label to ComfyUI ResolutionSelector COMBO choices."""
+    v = (val or "").lower().strip()
+    if "9:16" in v:
+        return "9:16 (Portrait Widescreen)"
+    if "16:9" in v:
+        return "16:9 (Widescreen)"
+    if "3:4" in v:
+        return "3:4 (Portrait Standard)"
+    if "4:3" in v:
+        return "4:3 (Standard)"
+    if "1:1" in v:
+        return "1:1 (Square)"
+    if "2:3" in v:
+        return "2:3 (Portrait Photo)"
+    if "3:2" in v:
+        return "3:2 (Photo)"
+    if "21:9" in v:
+        return "21:9 (Ultrawide)"
+    return default
+
+
 def detect_video_aspect_ratio(video_path: str | Path) -> str:
     """Detect aspect ratio category from video dimensions."""
     try:
@@ -372,18 +394,20 @@ def detect_video_aspect_ratio(video_path: str | Path) -> str:
             if w > 0 and h > 0:
                 ratio = w / h
                 if ratio >= 1.55:
-                    return "16:9 (Landscape Standard)"
+                    return "16:9 (Widescreen)"
                 elif ratio <= 0.65:
-                    return "9:16 (Portrait Mobile)"
+                    return "9:16 (Portrait Widescreen)"
                 elif ratio <= 0.88:
                     return "3:4 (Portrait Standard)"
                 elif 0.88 < ratio < 1.15:
                     return "1:1 (Square)"
+                elif 1.15 <= ratio < 1.55:
+                    return "4:3 (Standard)"
                 else:
-                    return "16:9 (Landscape Standard)"
+                    return "16:9 (Widescreen)"
     except Exception:
         pass
-    return "16:9 (Landscape Standard)"
+    return "16:9 (Widescreen)"
 
 
 def patch_bfs_prompt(
@@ -476,10 +500,10 @@ def patch_bfs_prompt(
         if ctype == "ResolutionSelector" or nid == "403":
             inputs["megapixels"] = float(resolution_mp)
             inputs["multiple"] = 32
-            if aspect_ratio == "auto":
+            if aspect_ratio == "auto" or not aspect_ratio:
                 inputs["aspect_ratio"] = detect_video_aspect_ratio(video_input_path)
             else:
-                inputs["aspect_ratio"] = str(aspect_ratio)
+                inputs["aspect_ratio"] = normalize_aspect_ratio(aspect_ratio)
 
         # 8. UNETLoader (Node 443) required weight_dtype
         if ctype == "UNETLoader" or nid == "443":
