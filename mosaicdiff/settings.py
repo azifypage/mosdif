@@ -86,14 +86,14 @@ class Settings:
 
         if chosen:
             return Path(chosen)
-        return LOCAL_DEFAULTS[key]
+        return LOCAL_DEFAULTS.get(key, models_dir() / f"{key}.safetensors")
 
     def missing(self) -> list[tuple[str, Path]]:
         gone = []
-        for key in PATH_KEYS:
+        for key in ("unet", "clip", "vae"):
             path = self.resolved(key)
             if not path.exists():
-                gone.append((MODEL_LABELS[key], path))
+                gone.append((MODEL_LABELS.get(key, key), path))
         return gone
 
     def save(self) -> None:

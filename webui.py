@@ -52,7 +52,7 @@ def get_system_info() -> str:
 def check_models_status() -> str:
     settings = Settings.load()
     lines = ["### Status Deteksi Model:"]
-    for key in ("detector", "vsr", "unet", "lora", "clip", "vae"):
+    for key in ("unet", "lora", "clip", "vae"):
         resolved_path = settings.resolved(key)
         name = MODEL_LABELS.get(key, key)
         if resolved_path.exists():

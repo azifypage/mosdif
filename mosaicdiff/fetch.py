@@ -203,45 +203,6 @@ def _download(key: str, destination: Path, log, cancel: threading.Event, progres
     log(f"Saved {destination.name}")
 
 
-def _use_detector_model(settings: Settings, log) -> None:
-    """Point at the ONNX file. An old TensorRT engine path is not the model."""
-    current = settings.resolved("detector")
-    if current.suffix.lower() == ".onnx" and current.is_file():
-        return
-    destination = models_dir() / BUNDLED_NAMES["detector"]
-    if not destination.is_file():
-        if shutil.which("7z"):
-            log("rfdetr.onnx tidak ditemukan. Mengunduh detector dari release GitHub...")
-            archive = models_dir() / "_MosaicDiff.7z"
-            import subprocess
-            import urllib.request
-            url = "https://github.com/dotaku22/MosaicDiff/releases/download/v1.0.1/MosaicDiff-windows.7z"
-            try:
-                urllib.request.urlretrieve(url, archive)
-                subprocess.run(
-                    ["7z", "e", str(archive), "models/rfdetr.onnx", f"-o{models_dir()}", "-y"],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                )
-                archive.unlink(missing_ok=True)
-                log("Berhasil mengekstrak rfdetr.onnx.")
-            except Exception as err:
-                log(f"Ekstraksi otomatis detector gagal: {err}")
-                archive.unlink(missing_ok=True)
-
-        if not destination.is_file():
-            raise FetchError(
-                f"File detector mozaik belum ditemukan di: {destination}\n"
-                "Silakan letakkan file 'rfdetr.onnx' di folder models/.\n"
-                "Di Google Colab / Linux, jalankan perintah:\n"
-                "  wget -q https://github.com/dotaku22/MosaicDiff/releases/download/v1.0.1/MosaicDiff-windows.7z && \\\n"
-                "  7z e MosaicDiff-windows.7z models/rfdetr.onnx -omodels/ -y && rm MosaicDiff-windows.7z"
-            )
-    settings.paths["detector"] = str(destination)
-    settings.save()
-    log(f"Using detector model {destination.name}")
-
-
 def ensure_weights(settings: Settings, log, cancel: threading.Event, progress=None) -> None:
     """Fill any missing public weights. Leave the LoRA for the user."""
     changed = False
@@ -262,8 +223,6 @@ def ensure_weights(settings: Settings, log, cancel: threading.Event, progress=No
         log(f"Using optional LoRA: {lora.name}")
     else:
         log("Base LTX-2.5 model has baked-in Eros10 & DMD LoRAs. No extra LoRA required.")
-
-    _use_detector_model(settings, log)
 
     missing = settings.missing()
     if missing:
