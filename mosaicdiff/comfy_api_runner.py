@@ -441,6 +441,11 @@ def patch_bfs_prompt(
             elif ctype == "VHS_VideoCombine" and ("comparison" in str(inputs).lower() or nid == "491"):
                 nodes_to_remove.append(nid)
 
+        # 10. Math Expression for video length (Node 455: a * b + 1)
+        if nid == "455" or (ctype == "ComfyMathExpression" and "b" in str(inputs.get("expression", ""))):
+            if "values.b" not in inputs and "b" not in inputs:
+                inputs["values.b"] = ["430", 0]
+
     # Prune second pass save nodes if disabled so ComfyUI only generates first pass
     for nid in nodes_to_remove:
         patched.pop(nid, None)

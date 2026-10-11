@@ -29,6 +29,10 @@
         "425",
         0
       ],
+      "values.b": [
+        "430",
+        0
+      ],
       "expression": "a * b + 1"
     },
     "class_type": "ComfyMathExpression",
