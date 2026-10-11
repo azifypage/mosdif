@@ -113,6 +113,7 @@ def ensure_bfs_models(
     comfy_root: str | Path = "/content/ComfyUI",
     enable_second_pass: bool = False,
     log_cb=print,
+    **kwargs,
 ) -> bool:
     """Verify and auto-download any missing official BFS model weights.
     
