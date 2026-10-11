@@ -53,7 +53,7 @@ def check_models(settings: Settings) -> bool:
     print_system_info()
     print("STATUS MODEL & DEPENDENSI:")
     all_ok = True
-    for key in ("detector", "vsr", "unet", "lora", "clip", "vae"):
+    for key in ("unet", "lora", "clip", "vae"):
         resolved = settings.resolved(key)
         name = MODEL_LABELS.get(key, key)
         if resolved.is_file():
@@ -61,7 +61,7 @@ def check_models(settings: Settings) -> bool:
             size_str = f"{size_mb / 1024:.2f} GB" if size_mb >= 1024 else f"{size_mb:.1f} MB"
             print(f"  [OK]       {name:<30} -> {resolved.name} ({size_str})")
         elif key == "lora":
-            print(f"  [OPTIONAL] {name:<30} -> Baked-in pada LTX-2.5 GGUF checkpoint")
+            print(f"  [OPTIONAL] {name:<30} -> Baked-in pada LTX-2.5 checkpoint")
         else:
             print(f"  [MISSING]  {name:<30} -> Belum ada ({resolved})")
             all_ok = False
@@ -227,16 +227,26 @@ def main() -> None:
         help="Seed acak untuk inpainting LTX-2.5 (default: 42).",
     )
     parser.add_argument(
+        "-i",
+        "--image",
+        "--head-image",
+        dest="head_image",
+        default=None,
+        help="Path file foto kepala/wajah sumber (misal: /content/head.jpg).",
+    )
+    parser.add_argument(
         "-d",
         "--denoise",
         type=float,
         default=None,
-        help="Kekuatan denoise/refinement terhadap referensi BasicVSR++ (0.2-0.6, default: 0.40).",
+        help="Kekuatan denoise/refinement kepala LTX-2.5 (0.2-0.7, default: 0.45).",
     )
 
     args = parser.parse_args()
 
     settings = Settings.load()
+    if args.head_image:
+        settings.head_image = args.head_image.strip()
     if args.comfy_root:
         settings.paths["comfy_root"] = args.comfy_root.strip()
     if args.comfy_python:

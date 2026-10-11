@@ -1,4 +1,4 @@
-"""BasicVSR++ on the mosaic, then MiniMax H3 on one locked crop."""
+"""Head replacement pipeline: detect head in video, align and composite source head, and refine with LTX-2.5."""
 
 from __future__ import annotations
 
@@ -23,18 +23,17 @@ from mosaicdiff.geometry import (
     split_samples,
     stable_crop,
 )
+from mosaicdiff.head_detector import HeadDetector, smooth_head_trajectory
+from mosaicdiff.align import HeadAligner
 from mosaicdiff.paths import nodes_dir, worker_script
 from mosaicdiff.settings import Settings
 from mosaicdiff.videoio import VideoWriter, copy_audio, open_capture
-from mosaicdiff.vsr import restore_squares
 
 DEFAULT_PROMPT = (
-    "high quality, natural skin texture, sharp focus, 4k photorealistic, "
-    "seamless natural detail, realistic lighting"
+    "photorealistic face and head, natural hair texture, sharp focus, "
+    "4k photorealistic, seamless skin tone blending, realistic lighting, detailed skin"
 )
 PROMPT = DEFAULT_PROMPT
-CHUNK = 90
-OVERLAP = 4
 
 
 class Cancelled(Exception):
@@ -44,7 +43,8 @@ class Cancelled(Exception):
 def unique_path(path: Path) -> Path:
     if not path.exists():
         return path
-    stem, suffix = path.stem, path.suffix
+    stem = path.stem
+    suffix = path.suffix
     number = 1
     while True:
         candidate = path.with_name(f"{stem} ({number}){suffix}")
@@ -60,17 +60,36 @@ def process_video(
     log,
     progress,
     cancel,
+    head_image: Path | str | None = None,
     prompt: str | None = None,
     seed: int | None = None,
     denoise: float | None = None,
     **kwargs,
 ) -> Path:
+    if head_image is not None:
+        settings.head_image = str(head_image).strip()
     if prompt is not None:
         settings.prompt = str(prompt).strip()
     if seed is not None:
         settings.seed = int(seed)
     if denoise is not None:
         settings.denoise = float(denoise)
+
+    # Validate head image
+    head_path = Path(settings.head_image) if settings.head_image else None
+    if head_path is None or not head_path.is_file():
+        # Fallback check common locations
+        for cand in [Path("/content/head.jpg"), Path("/content/head.png"), Path("/content/face.jpg"), Path("/content/face.png"), Path("head.jpg"), Path("head.png")]:
+            if cand.is_file():
+                head_path = cand
+                settings.head_image = str(cand)
+                break
+    if head_path is None or not head_path.is_file():
+        raise FileNotFoundError(
+            "Foto kepala/wajah sumber ('head_image') tidak ditemukan! "
+            "Silakan tentukan path foto wajah pada formulir Cell 5."
+        )
+
     missing = settings.missing()
     if missing:
         listed = ", ".join(label for label, _path in missing)
@@ -80,53 +99,55 @@ def process_video(
     destination = unique_path(destination)
     import torch
 
-    device = torch.device("cuda:0")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     if not torch.cuda.is_available():
-        raise RuntimeError("MosaicDiff needs an NVIDIA GPU")
+        raise RuntimeError("MosaicDiff Head Replacement needs an NVIDIA GPU")
 
-    from mosaicdiff.detect import Detector
-    from mosaicdiff.vsr import load_restorer
+    log(f"Memulai Head Replacement:")
+    log(f"  Target Video : {source.name}")
+    log(f"  Source Head  : {head_path.name}")
 
-    log(f"Detecting mosaic in {source.name}")
-    detector = Detector(settings.resolved("detector"), device)
-    log(f"Detector model on {detector.provider}")
+    detector = HeadDetector()
     try:
-        boxes, width, height, fps, _count = _detect(source, detector, log, progress, cancel)
+        aligner = HeadAligner(head_path, detector)
+    except Exception as exc:
+        detector.close()
+        raise RuntimeError(f"Gagal memproses foto kepala '{head_path.name}': {exc}")
+
+    comp_path = destination.with_name(destination.stem + ".comp" + destination.suffix)
+    try:
+        head_boxes, width, height, fps, count = _detect_and_composite(
+            source, comp_path, aligner, detector, log, progress, cancel
+        )
     finally:
         detector.close()
         torch.cuda.empty_cache()
 
-    present = [box for box in boxes if box is not None]
+    present = [box for box in head_boxes if box is not None]
     if not present:
-        raise RuntimeError(f"No mosaic found in {source.name}")
+        comp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Tidak ditemukan wajah/kepala pada video {source.name}")
 
     grown = []
-    for box in boxes:
+    for box in head_boxes:
         if box is None:
             grown.append(None)
         else:
             grown.append(expand_box(*box, height, width))
 
-    log(f"BasicVSR++ on {len(present)} frames")
-    restorer = load_restorer(settings.resolved("vsr"), device)
-    vsr_path = destination.with_name(destination.stem + ".vsr" + destination.suffix)
-    try:
-        _restore_video(source, vsr_path, grown, restorer, device, fps, progress, cancel)
-    finally:
-        del restorer
-        torch.cuda.empty_cache()
-
     crop = stable_crop([box for box in grown if box is not None], width, height)
-    log(f"LTX-2.5 crop {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]}")
+    log(f"LTX-2.5 Head crop {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]}")
+
     try:
-        _h3(source, vsr_path, destination, settings, crop, grown, fps, log, progress, cancel)
+        _h3(source, comp_path, destination, settings, crop, grown, fps, log, progress, cancel)
     except Cancelled:
-        vsr_path.unlink(missing_ok=True)
+        comp_path.unlink(missing_ok=True)
         raise
     except Exception:
-        log(f"LTX-2.5 stopped. The BasicVSR++ video is still at {vsr_path.name}")
+        log(f"LTX-2.5 stopped. The intermediate composite video is at {comp_path.name}")
         raise
-    vsr_path.unlink(missing_ok=True)
+
+    comp_path.unlink(missing_ok=True)
     progress(1.0, "Done")
     return destination
 
@@ -136,95 +157,68 @@ def _check(cancel) -> None:
         raise Cancelled()
 
 
-def _detect(source, detector, log, progress, cancel):
+def _detect_and_composite(
+    source: Path,
+    comp_path: Path,
+    aligner: HeadAligner,
+    detector: HeadDetector,
+    log,
+    progress,
+    cancel,
+) -> tuple[list[tuple[int, int, int, int] | None], int, int, float, int]:
+    """Pass 1: Detect head in all frames with trajectory smoothing.
+    Pass 2: Align & composite source head into video frames.
+    """
     capture, width, height, fps, count = open_capture(source)
-    boxes = []
-    batch = []
+    detections = []
     seen = 0
+    log(f"Mendeteksi kepala pada seluruh frame video ({count} frames)...")
     try:
         while True:
             _check(cancel)
             ok, frame = capture.read()
             if not ok:
                 break
-            batch.append(frame)
+            det = detector.detect_head(frame)
+            detections.append(det)
             seen += 1
-            if len(batch) == detector.batch:
-                boxes.extend(detector.best_boxes(batch))
-                batch = []
-                if count:
-                    progress(0.25 * min(1.0, seen / count), "Detecting")
-        if batch:
-            boxes.extend(detector.best_boxes(batch))
+            if count and seen % 10 == 0:
+                progress(0.18 * min(1.0, seen / count), f"Mendeteksi Kepala ({seen}/{count})")
     finally:
         capture.release()
-    log(f"{sum(box is not None for box in boxes)} of {len(boxes)} frames have a mosaic")
-    return boxes, width, height, fps, len(boxes)
 
+    if not any(d is not None for d in detections):
+        return [], width, height, fps, 0
 
-def _restore_video(source, vsr_path, boxes, model, device, fps, progress, cancel) -> None:
-    capture, width, height, _fps, count = open_capture(source)
-    writer = VideoWriter(vsr_path, width, height, Fraction(fps).limit_denominator(1000))
-    hold: list[tuple[np.ndarray, tuple[int, int, int, int] | None]] = []
-    frame_index = 0
-    skip_head = 0
+    log("Menghaluskan lintasan kepala (smoothing trajectory)...")
+    smoothed = smooth_head_trajectory(detections)
+    head_boxes = [d["head_box"] if d is not None else None for d in smoothed]
+
+    log("Menggabungkan kepala sumber ke frame video...")
+    capture, width, height, fps, count = open_capture(source)
+    writer = VideoWriter(comp_path, width, height, Fraction(fps).limit_denominator(1000))
+    idx = 0
     try:
         while True:
             _check(cancel)
             ok, frame = capture.read()
             if not ok:
                 break
-            hold.append((frame, boxes[frame_index] if frame_index < len(boxes) else None))
-            frame_index += 1
-            if len(hold) >= CHUNK:
-                _flush_chunk(hold, model, device, writer, keep_tail=OVERLAP, skip_head=skip_head)
-                skip_head = OVERLAP
-                if count:
-                    progress(0.25 + 0.30 * min(1.0, frame_index / count), "BasicVSR++")
-        if hold:
-            _check(cancel)
-            _flush_chunk(hold, model, device, writer, keep_tail=0, skip_head=skip_head)
+            info = smoothed[idx] if idx < len(smoothed) else None
+            if info is not None:
+                composited, _mask = aligner.composite_head(frame, info)
+                writer.write(composited)
+            else:
+                writer.write(frame)
+            idx += 1
+            if count and idx % 10 == 0:
+                progress(0.18 + 0.22 * min(1.0, idx / count), f"Compositing Head ({idx}/{count})")
     finally:
         capture.release()
         writer.close()
 
-
-def _flush_chunk(hold, model, device, writer, keep_tail: int, skip_head: int) -> None:
-    if not hold:
-        return
-    indexed = [(index, frame, box) for index, (frame, box) in enumerate(hold) if box is not None]
-    restored: dict[int, np.ndarray] = {}
-    if indexed:
-        squares = []
-        metas = []
-        for _index, frame, box in indexed:
-            x1, y1, x2, y2 = box
-            crop = frame[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-            square, meta = letterbox(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            squares.append(square)
-            metas.append((_index, box, meta))
-        if squares:
-            output = restore_squares(model, squares, device)
-            for (index, box, meta), square in zip(metas, output):
-                restored[index] = _unletterbox(square, box, meta)
-    end = len(hold) if keep_tail <= 0 else max(skip_head, len(hold) - keep_tail)
-    for index in range(skip_head, end):
-        frame, box = hold[index]
-        patch = restored.get(index)
-        if patch is not None and box is not None:
-            frame = _paste(frame, patch, box)
-        writer.write(frame)
-    del hold[:end]
-
-
-def _unletterbox(square_rgb: np.ndarray, box, meta) -> np.ndarray:
-    x0, y0, fitted_w, fitted_h = meta
-    content = square_rgb[y0 : y0 + fitted_h, x0 : x0 + fitted_w]
-    bgr = cv2.cvtColor(content, cv2.COLOR_RGB2BGR)
-    x1, y1, x2, y2 = box
-    return cv2.resize(bgr, (max(1, x2 - x1), max(1, y2 - y1)), interpolation=cv2.INTER_LANCZOS4)
+    log(f"Berhasil menggabungkan kepala pada {sum(b is not None for b in head_boxes)} dari {len(head_boxes)} frame")
+    return head_boxes, width, height, fps, len(head_boxes)
 
 
 def _paste(frame: np.ndarray, patch: np.ndarray, box) -> np.ndarray:
@@ -239,7 +233,7 @@ def _paste(frame: np.ndarray, patch: np.ndarray, box) -> np.ndarray:
     if fitted.shape[1] != x2 - x1 or fitted.shape[0] != y2 - y1:
         fitted = cv2.resize(fitted, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LANCZOS4)
     short = min(y2 - y1, x2 - x1)
-    falloff = max(24, min(round(short * 0.06), short // 6))
+    falloff = max(24, min(round(short * 0.08), short // 5))
     fade = edge_fade(y2 - y1, x2 - x1, falloff)
     base = frame.copy()
     region = base[y1:y2, x1:x2].astype(np.float32)
@@ -248,17 +242,17 @@ def _paste(frame: np.ndarray, patch: np.ndarray, box) -> np.ndarray:
     return base
 
 
-def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log, progress, cancel) -> None:
+def _h3(source, comp_path, destination, settings: Settings, crop, boxes, fps, log, progress, cancel) -> None:
     present = [index for index, box in enumerate(boxes) if box is not None]
     first, last = present[0], present[-1]
     span = frames_at_h3_fps(last - first + 1, fps)
     sampled = [first + index for index in span]
     windows = split_samples(sampled)
     if not windows:
-        raise RuntimeError("The restored section is shorter than 9 frames at 24 fps")
+        raise RuntimeError("Bagian video yang terdeteksi kepala terlalu pendek (< 9 frame)")
     gen_w, gen_h = generation_size(crop[2] - crop[0], crop[3] - crop[1], settings.h3_resolution)
     log(f"LTX-2.5 Diffusion pass, {len(windows)} sample(s), {gen_w}x{gen_h}")
-    progress(0.58, "LTX-2.5")
+    progress(0.45, "LTX-2.5 Head Diffusion")
     with tempfile.TemporaryDirectory(prefix="mosaicdiff-", dir=str(destination.parent)) as temp_name:
         temp = Path(temp_name)
         specs = []
@@ -296,7 +290,7 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
         user_prompt = (getattr(settings, "prompt", "") or "").strip()
         effective_prompt = user_prompt if user_prompt else DEFAULT_PROMPT
         effective_seed = int(getattr(settings, "seed", 42))
-        effective_denoise = float(getattr(settings, "denoise", 0.40))
+        effective_denoise = float(getattr(settings, "denoise", 0.45))
         log(f"LTX-2.5 Refiner: Denoise={effective_denoise:.2f} | Steps={settings.ltx_steps} | Seed={effective_seed}")
         log(f"LTX-2.5 Prompt: '{effective_prompt}'")
 
@@ -309,15 +303,15 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
             "video_vae": str(settings.resolved("vae")),
             "prompt": effective_prompt,
             "seed": effective_seed,
-            "steps": int(getattr(settings, "ltx_steps", getattr(settings, "h3_steps", 4))),
+            "steps": int(getattr(settings, "ltx_steps", getattr(settings, "h3_steps", 6))),
             "denoise": effective_denoise,
-            "video": str(vsr_path),
+            "video": str(comp_path),
             "windows": specs,
         }
         job_path = temp / "job.json"
         job_path.write_text(json.dumps(job), encoding="utf-8")
         _run_comfy(settings.resolved("comfy_python"), job_path, log, cancel)
-        progress(0.9, "Writing")
+        progress(0.9, "Writing Output Video")
         pastes = {}
         for spec in specs:
             out_dir = Path(spec["out_dir"])
@@ -326,7 +320,7 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
                 if image.is_file():
                     pastes[int(frame_idx)] = image
         output_fps = H3_FPS if fps > H3_FPS + 0.05 else fps
-        _write_output(vsr_path, destination, pastes, crop, output_fps, fps, len(boxes))
+        _write_output(comp_path, destination, pastes, crop, output_fps, fps, len(boxes))
         if settings.compare:
             compare_path = destination.with_name(destination.stem + "_compare" + destination.suffix)
             try:
@@ -342,7 +336,7 @@ def _h3(source, vsr_path, destination, settings: Settings, crop, boxes, fps, log
     except Exception as exc:
         with_audio.unlink(missing_ok=True)
         log(f"Audio was not copied: {exc}")
-    log(f"Wrote {destination.name}")
+    log(f"Berhasil menulis video hasil: {destination.name}")
 
 
 def _run_comfy(python: Path, job_path: Path, log, cancel) -> None:
@@ -379,8 +373,8 @@ def _run_comfy(python: Path, job_path: Path, log, cancel) -> None:
         raise RuntimeError(f"LTX-2.5 diffusion process exited with status {code}")
 
 
-def _write_output(vsr_path, destination, pastes, crop, output_fps, source_fps, frame_count: int) -> None:
-    capture, width, height, _fps, _count = open_capture(vsr_path)
+def _write_output(comp_path, destination, pastes, crop, output_fps, source_fps, frame_count: int) -> None:
+    capture, width, height, _fps, _count = open_capture(comp_path)
     keep = set(frames_at_h3_fps(frame_count, source_fps)) if output_fps == H3_FPS else None
     writer = VideoWriter(destination, width, height, Fraction(output_fps).limit_denominator(1000))
     index = 0
@@ -408,35 +402,22 @@ def _write_compare(source, restored, destination, source_fps) -> None:
     original, _w, _h, _fps, original_count = open_capture(source)
     result, width, height, _fps, restored_count = open_capture(restored)
     if abs(source_fps - H3_FPS) > 0.05 and original_count != restored_count:
-        indices = frames_at_h3_fps(original_count, source_fps)
+        scale = restored_count / original_count
+        frame_map = {index: int(round(index * scale)) for index in range(original_count)}
     else:
-        indices = list(range(min(original_count, restored_count)))
-    wanted = set(indices)
-    writer = VideoWriter(destination, width * 2, height, Fraction(H3_FPS if len(indices) != original_count else source_fps).limit_denominator(1000))
+        frame_map = None
+    writer = VideoWriter(destination, width * 2, height, Fraction(H3_FPS).limit_denominator(1000))
     index = 0
-    written = 0
     try:
-        while written < len(indices):
-            ok, frame = original.read()
-            if not ok:
+        while True:
+            ok_orig, frame_orig = original.read()
+            ok_res, frame_res = result.read()
+            if not ok_orig or not ok_res:
                 break
-            if index in wanted:
-                ok, right = result.read()
-                if not ok:
-                    break
-                left = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
-                pair = np.concatenate((left, right[:height, :width]), axis=1)
-                _label(pair, "with mosaic", 16)
-                _label(pair, "without mosaic", width + 16)
-                writer.write(pair)
-                written += 1
+            side_by_side = np.hstack([frame_orig, frame_res])
+            writer.write(side_by_side)
             index += 1
     finally:
         original.release()
         result.release()
         writer.close()
-
-
-def _label(image: np.ndarray, text: str, x: int) -> None:
-    cv2.putText(image, text, (x, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(image, text, (x, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 1, cv2.LINE_AA)

@@ -18,8 +18,6 @@ from mosaicdiff.paths import (
 )
 
 PATH_KEYS = (
-    "vsr",
-    "detector",
     "unet",
     "clip",
     "vae",
@@ -31,13 +29,14 @@ PATH_KEYS = (
 @dataclass
 class Settings:
     output_dir: str = ""
-    h3_seconds: int = 4
+    head_image: str = ""
+    h3_seconds: int = 3
     h3_resolution: int = 512
-    h3_steps: int = 4
+    h3_steps: int = 6
     compare: bool = False
     prompt: str = ""
     seed: int = 42
-    denoise: float = 0.40
+    denoise: float = 0.45
     paths: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -100,6 +99,7 @@ class Settings:
     def save(self) -> None:
         payload = {
             "output_dir": self.output_dir,
+            "head_image": self.head_image,
             "h3_seconds": self.h3_seconds,
             "h3_resolution": self.h3_resolution,
             "h3_steps": self.h3_steps,
@@ -128,13 +128,14 @@ class Settings:
             return settings
         settings = cls(
             output_dir=str(data.get("output_dir") or ""),
-            h3_seconds=int(data.get("h3_seconds") or 4),
+            head_image=str(data.get("head_image") or ""),
+            h3_seconds=int(data.get("h3_seconds") or 3),
             h3_resolution=int(data.get("h3_resolution") or 512),
-            h3_steps=int(data.get("h3_steps") or 4),
+            h3_steps=int(data.get("h3_steps") or 6),
             compare=False,
             prompt=str(data.get("prompt") or ""),
             seed=int(data.get("seed") or 42),
-            denoise=float(data.get("denoise") or 0.40),
+            denoise=float(data.get("denoise") or 0.45),
             paths={key: str(value) for key, value in dict(data.get("paths") or {}).items()},
         )
         settings.h3_seconds = min(15, max(1, settings.h3_seconds))

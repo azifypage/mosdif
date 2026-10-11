@@ -9,8 +9,6 @@ APP_DIR_NAME = "MosaicDiff"
 
 # Names used when someone drops the weights next to the installed program.
 BUNDLED_NAMES = {
-    "vsr": "basicvsr.pth",
-    "detector": "rfdetr.onnx",
     "unet": "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",
     "lora": "lora.safetensors",
     "clip": "gemma4_12b_ltx25_uncensored-int8.safetensors",
@@ -24,8 +22,6 @@ LOCAL_DEFAULTS = {
 }
 
 MODEL_LABELS = {
-    "vsr": "BasicVSR++ checkpoint",
-    "detector": "Mosaic detector",
     "unet": "LTX-2.5 Stubelius Remix v1 DiT",
     "lora": "Optional LoRA (Baked into GGUF by default)",
     "clip": "Gemma-4 LTX-2.5 Text Encoder",

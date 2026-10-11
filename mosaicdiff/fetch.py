@@ -19,11 +19,6 @@ from mosaicdiff.settings import Settings
 
 # repo, filename inside the repo, optional git revision
 _REMOTE = {
-    "vsr": (
-        "ladaapp/lada",
-        "lada_mosaic_restoration_model_generic_v1.2.pth",
-        "3bfd69ffc21518bde80ba6b61696d51efd0a398b",
-    ),
     "unet": (
         "Stuubs/Stubelius_Remix_Ltx2.5",
         "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",

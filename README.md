@@ -1,42 +1,23 @@
-# MosaicDiff
+# mosdif - Video Head Replacement
 
-Restore mosaic using MiniMax H3 and custom lora.
+Replace full heads (face + hair + skull) in video inputs using a source portrait photo, powered by **LTX-2.5 Diffusion** (`Stubelius Remix v1` / `Lightricks LTX-2.5`).
 
-It needs a beefy GPU. It is slow, and the quality is outstanding. One second of video takes about one minute on an RTX 3070 Ti.
+## Core Features
+- **2 Inputs**: Target Video (`input.mp4`) + Source Head Photo (`head.jpg`).
+- **Full Head Replacement**: Replaces the entire head (face, facial features, hair volume, and skull contour) instead of a simple face-swap.
+- **MediaPipe / OpenCV Landmark Alignment**: Automatically tracks the head in the video, smooths motion trajectory, aligns angle/scale/tilt, and harmonizes skin tones.
+- **LTX-2.5 Neural Diffusion Refiner**: Renders seamless skin-to-neck transitions, realistic skin textures, hair physics, and scene lighting coherence.
+- **Google Colab Ready**: Interactive notebook with `#@param` GUI controls, inline Base64 video previews, and high-speed `aria2c` downloads.
 
-## Examples
+## Usage in Google Colab
+Open `MosaicDiff_Colab.ipynb` in Google Colab (select GPU runtime: T4 / L4 / A100):
+1. Run Cell 1 to 3 to prepare the workspace and dependencies (`mediapipe`, `ComfyUI`).
+2. Run Cell 4 to download LTX-2.5 Stubelius Remix weights.
+3. Configure Cell 5 with your video and head photo paths.
+4. Run Cell 6 to execute Video Head Replacement.
+5. Preview and download the result in Cell 7!
 
-Censored AI-generated clips made with MosaicDiff are on [Civitai](https://civitai.red/models/2990026/mosaic-restoration).
-
-## Download the Windows program
-
-The ready-to-run build is on the [Releases](https://github.com/dotaku22/MosaicDiff/releases) page. Download `MosaicDiff-windows.7z`, open it with [7-Zip](https://www.7-zip.org/), and run `MosaicDiff.exe`.
-
-That download does not include ComfyUI. Licenses for the shipped pieces are in the `licenses` folder. Start with `licenses\NOTICES.txt`.
-
-On the other PC:
-
-- An NVIDIA GPU and a current driver.
-- A current ComfyUI install, the normal one from the ComfyUI site or the portable package. MosaicDiff looks for it in the usual folders. If it cannot find it, set **ComfyUI Python** and **ComfyUI folder** in **Models**.
-- The Windows download includes the custom LoRA. BasicVSR++, Eros Max, the text encoder, and the video VAE download on first Start when they are missing.
-
-The H3 context-window node and the RTX upscaler ship in `comfy_nodes` and are loaded from there. The other PC does not install those itself. The first H3 run installs the NVIDIA video effects package into that ComfyUI Python if it is not already there. ComfyUI itself still has to include the built-in MiniMax H3 nodes, so use a current ComfyUI.
-
-The mosaic detector runs on the NVIDIA GPU. The log should say `Detector model on CUDAExecutionProvider`.
-
-## Run it from source
-
-`run.bat` uses a virtual environment next to this folder when that environment is there. Otherwise it uses Python on the PATH. Finished videos go to `Output`. If a public weight file is missing, Start downloads it into `models\`. Place the LoRA there as `lora.safetensors`. Open **Models** if a path is wrong.
-
-Install `onnxruntime-gpu`, not the plain `onnxruntime` package. The plain package only runs the detector on the CPU, and the two packages conflict. If the CPU package is already installed:
-
+## CLI Usage
+```bash
+python cli.py video.mp4 -i head.jpg -o output/result.mp4 --denoise 0.45 --steps 8
 ```
-python -m pip uninstall -y onnxruntime
-python -m pip install -r requirements.txt
-```
-
-The log should then say `Detector model on CUDAExecutionProvider`.
-
-## What the window does
-
-Add videos and press Start. Finished files are written to `Output`. Two sliders matter: how many seconds H3 samples at once, and the H3 resolution. BasicVSR++ runs from its checkpoint, and the mosaic detector runs from its ONNX model. Neither is compiled to TensorRT.
