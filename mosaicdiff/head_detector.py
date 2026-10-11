@@ -52,9 +52,23 @@ class HeadDetector:
                 self._haar = cv2.CascadeClassifier(cascade_path)
                 self._backend = "opencv_haar"
             except Exception:
-                self._haar = None
+                pass
+
+        # Semantic silhouette segmentation for pixel-perfect hair & head contouring
+        self._mp_selfie = None
+        try:
+            import mediapipe as mp
+            self._mp_selfie = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+        except Exception:
+            self._mp_selfie = None
 
     def close(self):
+        if self._mp_selfie is not None:
+            try:
+                self._mp_selfie.close()
+            except Exception:
+                pass
+            self._mp_selfie = None
         if self._mp_face_mesh is not None:
             try:
                 self._mp_face_mesh.close()
@@ -97,7 +111,18 @@ class HeadDetector:
 
                 # Expand to FULL HEAD (covers entire skull, hair volume, ears, and upper neck)
                 head_box = self._expand_to_full_head(fx1, fy1, fx2, fy2, w, h)
-                mask = self._generate_head_mask(head_box, pts, w, h)
+
+                # Semantic silhouette segmentation for pixel-perfect hair & head contour
+                seg_mask = None
+                if self._mp_selfie is not None:
+                    try:
+                        seg_res = self._mp_selfie.process(rgb)
+                        if seg_res and seg_res.segmentation_mask is not None:
+                            seg_mask = seg_res.segmentation_mask.astype(np.float32)
+                    except Exception:
+                        seg_mask = None
+
+                mask = self._generate_head_mask(head_box, pts, w, h, seg_mask=seg_mask)
                 return {
                     "face_box": (int(fx1), int(fy1), int(fx2), int(fy2)),
                     "head_box": head_box,
@@ -136,7 +161,17 @@ class HeadDetector:
                     ], dtype=np.float32)
 
                 head_box = self._expand_to_full_head(fx1, fy1, fx2, fy2, w, h)
-                mask = self._generate_head_mask(head_box, None, w, h)
+
+                seg_mask = None
+                if self._mp_selfie is not None:
+                    try:
+                        seg_res = self._mp_selfie.process(rgb)
+                        if seg_res and seg_res.segmentation_mask is not None:
+                            seg_mask = seg_res.segmentation_mask.astype(np.float32)
+                    except Exception:
+                        seg_mask = None
+
+                mask = self._generate_head_mask(head_box, None, w, h, seg_mask=seg_mask)
                 return {
                     "face_box": (fx1, fy1, fx2, fy2),
                     "head_box": head_box,
@@ -190,29 +225,50 @@ class HeadDetector:
 
         return (hx1, hy1, hx2, hy2)
 
-    def _generate_head_mask(self, head_box: tuple[int, int, int, int], landmarks_pts: np.ndarray | None, frame_w: int, frame_h: int) -> np.ndarray:
+    def _generate_head_mask(
+        self,
+        head_box: tuple[int, int, int, int],
+        landmarks_pts: np.ndarray | None,
+        frame_w: int,
+        frame_h: int,
+        seg_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
         """Create a smooth feathered 2D float32 mask (0.0 to 1.0) covering the full head."""
         hx1, hy1, hx2, hy2 = head_box
-        mask = np.zeros((frame_h, frame_w), dtype=np.float32)
-
         hw = hx2 - hx1
         hh = hy2 - hy1
-        cx = int((hx1 + hx2) / 2)
-        cy = int((hy1 + hy2) / 2)
-        rx = max(4, int(hw * 0.48))
-        ry = max(4, int(hh * 0.48))
 
-        # Fill central ellipse
-        cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 1.0, -1)
+        if seg_mask is not None:
+            # High-precision semantic hair & skull silhouette
+            box_zone = np.zeros((frame_h, frame_w), dtype=np.float32)
+            cv2.rectangle(box_zone, (hx1, hy1), (hx2, hy2), 1.0, -1)
+            k_zone = max(11, int(min(hw, hh) * 0.12))
+            if k_zone % 2 == 0:
+                k_zone += 1
+            box_zone = cv2.GaussianBlur(box_zone, (k_zone, k_zone), sigmaX=k_zone / 3.0)
 
-        # Soft border feathering with Gaussian blur
-        k_size = max(5, int(min(hw, hh) * 0.15))
-        if k_size % 2 == 0:
-            k_size += 1
-        mask = cv2.GaussianBlur(mask, (k_size, k_size), sigmaX=k_size / 3.0)
+            raw_head = np.clip(seg_mask * box_zone, 0.0, 1.0)
+            core = (raw_head > 0.40).astype(np.float32)
+
+            k_size = max(5, int(min(hw, hh) * 0.10))
+            if k_size % 2 == 0:
+                k_size += 1
+            mask = cv2.GaussianBlur(core, (k_size, k_size), sigmaX=k_size / 3.0)
+        else:
+            mask = np.zeros((frame_h, frame_w), dtype=np.float32)
+            cx = int((hx1 + hx2) / 2)
+            cy = int((hy1 + hy2) / 2)
+            rx = max(4, int(hw * 0.48))
+            ry = max(4, int(hh * 0.48))
+            cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 1.0, -1)
+
+            k_size = max(5, int(min(hw, hh) * 0.15))
+            if k_size % 2 == 0:
+                k_size += 1
+            mask = cv2.GaussianBlur(mask, (k_size, k_size), sigmaX=k_size / 3.0)
 
         # Smooth neck fade at the bottom (linear falloff)
-        neck_start = int(hy1 + hh * 0.75)
+        neck_start = int(hy1 + hh * 0.72)
         for y in range(neck_start, min(frame_h, hy2)):
             factor = float(1.0 - (y - neck_start) / max(1, hy2 - neck_start))
             mask[y, hx1:hx2] *= factor
