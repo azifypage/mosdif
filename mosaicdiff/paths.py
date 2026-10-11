@@ -9,10 +9,10 @@ APP_DIR_NAME = "MosaicDiff"
 
 # Names used when someone drops the weights next to the installed program.
 BUNDLED_NAMES = {
-    "unet": "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",
+    "unet": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
     "lora": "head_swap_ltx25_r128_v1.1.safetensors",
-    "clip": "gemma4_12b_ltx25_uncensored-int8.safetensors",
-    "vae": "ltx25_uncensored_video_vae.safetensors",
+    "clip": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+    "vae": "ltx-2.5-video-vae-bf16.safetensors",
 }
 
 # ComfyUI stays an install. Weight files are resolved from models\ next to the program.

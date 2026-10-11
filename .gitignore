@@ -16,3 +16,4 @@ models/*.engine
 models/*.onnx
 models/*.safetensors
 models/_incoming/
+scratch/
