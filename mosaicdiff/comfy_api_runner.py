@@ -345,6 +345,46 @@ def convert_workflow_to_prompt(
     return load_bfs_prompt(api_path=workflow_path, log_cb=log_cb)
 
 
+def build_ltx_sigmas(steps: int) -> str:
+    """Generate dynamic LTX-2.5 sigmas schedule for the requested step count."""
+    if steps == 8:
+        return "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+    base = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0]
+    import numpy as np
+    x_base = np.linspace(0, 1, len(base))
+    x_target = np.linspace(0, 1, max(2, int(steps)) + 1)
+    sigmas = np.interp(x_target, x_base, base)
+    sigmas[0] = 1.0
+    sigmas[-1] = 0.0
+    return ", ".join(f"{s:.6f}".rstrip("0").rstrip(".") for s in sigmas)
+
+
+def detect_video_aspect_ratio(video_path: str | Path) -> str:
+    """Detect aspect ratio category from video dimensions."""
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(video_path))
+        if cap.isOpened():
+            w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            cap.release()
+            if w > 0 and h > 0:
+                ratio = w / h
+                if ratio >= 1.55:
+                    return "16:9 (Landscape Standard)"
+                elif ratio <= 0.65:
+                    return "9:16 (Portrait Mobile)"
+                elif ratio <= 0.88:
+                    return "3:4 (Portrait Standard)"
+                elif 0.88 < ratio < 1.15:
+                    return "1:1 (Square)"
+                else:
+                    return "16:9 (Landscape Standard)"
+    except Exception:
+        pass
+    return "16:9 (Landscape Standard)"
+
+
 def patch_bfs_prompt(
     prompt_dict: dict,
     video_input_path: str | Path,
@@ -355,6 +395,8 @@ def patch_bfs_prompt(
     steps: int = 8,
     seed: int = 42,
     enable_second_pass: bool = False,
+    resolution_mp: float = 1.0,
+    aspect_ratio: str = "auto",
     comfy_root: str | Path = "/content/ComfyUI",
 ) -> dict:
     """Patch the API prompt graph nodes with user-provided parameters."""
@@ -418,7 +460,7 @@ def patch_bfs_prompt(
         if ctype == "CLIPTextEncode" and ("Negative" in title or nid == "444"):
             inputs["text"] = neg_prompt
 
-        # 6. Samplers & Schedulers
+        # 6. Samplers & Schedulers (Sampling Steps & Sigmas)
         if "seed" in inputs or "noise_seed" in inputs:
             k = "noise_seed" if "noise_seed" in inputs else "seed"
             inputs[k] = int(seed)
@@ -426,22 +468,34 @@ def patch_bfs_prompt(
         if ctype in ("BasicScheduler", "LTXVScheduler") and "steps" in inputs:
             inputs["steps"] = int(steps)
 
-        # 7. UNETLoader (Node 443) required weight_dtype
+        if ctype == "ManualSigmas" or nid == "471":
+            inputs["sigmas"] = build_ltx_sigmas(int(steps))
+
+        # 7. Resolution & Aspect Ratio (Node 403: ResolutionSelector)
+        if ctype == "ResolutionSelector" or nid == "403":
+            inputs["megapixels"] = float(resolution_mp)
+            inputs["multiple"] = 32
+            if aspect_ratio == "auto":
+                inputs["aspect_ratio"] = detect_video_aspect_ratio(video_input_path)
+            else:
+                inputs["aspect_ratio"] = str(aspect_ratio)
+
+        # 8. UNETLoader (Node 443) required weight_dtype
         if ctype == "UNETLoader" or nid == "443":
             inputs["weight_dtype"] = "default"
 
-        # 8. CLIPLoader (Node 446) required type
+        # 9. CLIPLoader (Node 446) required type
         if ctype == "CLIPLoader" or nid == "446":
             inputs.setdefault("type", "ltxv")
 
-        # 9. Second Pass & Comparison Video Handling
+        # 10. Second Pass & Comparison Video Handling
         if not enable_second_pass:
             if ctype == "SaveVideo" and ("Second Pass" in title or nid == "75"):
                 nodes_to_remove.append(nid)
             elif ctype == "VHS_VideoCombine" and ("comparison" in str(inputs).lower() or nid == "491"):
                 nodes_to_remove.append(nid)
 
-        # 10. Math Expression for video length (Node 455: a * b + 1)
+        # 11. Math Expression for video length (Node 455: a * b + 1)
         if nid == "455" or (ctype == "ComfyMathExpression" and "b" in str(inputs.get("expression", ""))):
             if "values.b" not in inputs and "b" not in inputs:
                 inputs["values.b"] = ["430", 0]
