@@ -64,7 +64,6 @@ def start_comfy_daemon(
         "--port",
         str(port),
         "--disable-auto-launch",
-        "--highvram",
     ]
 
     proc = subprocess.Popen(
@@ -252,6 +251,13 @@ def patch_bfs_prompt(
     # Prune second pass save nodes if disabled so ComfyUI doesn't execute them
     for nid in nodes_to_remove:
         patched.pop(nid, None)
+
+    # 8. Clean up Qwen auto-prompt subgraph if Qwen3-VL model is not downloaded
+    qwen_model_path = Path(comfy_root).resolve() / "models" / "text_encoders" / "qwen3-vl-4b-heretic_int8_dynamic_convrot.safetensors"
+    if not qwen_model_path.is_file():
+        qwen_nodes = ["445", "447", "607", "608", "602", "563", "645", "567"]
+        for qnid in qwen_nodes:
+            patched.pop(qnid, None)
 
     return patched
 
