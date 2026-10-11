@@ -196,9 +196,9 @@ def _load(job: dict):
     _enable_dynamic_vram()
     import torch
     import comfy.sd
-    import comfy.utils
     from comfy_extras.nodes_custom_sampler import (
         BasicGuider,
+        CFGGuider,
         BasicScheduler,
         KSamplerSelect,
         RandomNoise,
@@ -213,11 +213,12 @@ def _load(job: dict):
 
     lora_path = job.get("lora")
     if lora_path and Path(lora_path).is_file():
-        print(f"Loading optional LoRA: {Path(lora_path).name}", flush=True)
+        strength = float(job.get("lora_strength", 0.80))
+        print(f"Loading BFS Head Swap LoRA: {Path(lora_path).name} (strength: {strength:.2f})", flush=True)
         lora, lora_metadata = comfy.utils.load_torch_file(lora_path, safe_load=True, return_metadata=True)
-        model, _clip = comfy.sd.load_lora_for_models(model, None, lora, 1.0, 0, lora_metadata=lora_metadata)
+        model, _clip = comfy.sd.load_lora_for_models(model, None, lora, strength, 0, lora_metadata=lora_metadata)
     else:
-        print("Base model has baked-in LoRAs (Eros10 NSFW & DMD Distilled). Running directly.", flush=True)
+        print("Notice: No BFS Head Swap LoRA provided, running base model.", flush=True)
 
     _watch_progress()
     _watch_vae(vae)
@@ -231,6 +232,7 @@ def _load(job: dict):
         "base_model": model,
         "decode": VAEDecode(),
         "guider": BasicGuider,
+        "cfg_guider": CFGGuider,
         "scheduler": BasicScheduler,
         "sampler": KSamplerSelect,
         "noise": RandomNoise,
@@ -562,26 +564,54 @@ def _restore_window(loaded, job: dict, window: dict, crops: dict | None = None) 
         flush=True,
     )
 
-    # Encode prompt for LTX
-    tokens = loaded["clip"].tokenize(job["prompt"])
-    cond = loaded["clip"].encode_from_tokens_scheduled(tokens)
-    # Inject frame_rate into conditioning
+    # Format prompt according to BFS Head Swap standard
+    raw_prompt = job.get("prompt", "").strip()
+    if not raw_prompt.lower().startswith("head_swap:") and not raw_prompt.lower().startswith("head swap"):
+        if raw_prompt:
+            prompt_text = f"head_swap:\nFACE:\n{raw_prompt}"
+        else:
+            prompt_text = "head_swap:\nFACE:\nPhotorealistic human face, natural skin texture, sharp detailed eyes."
+    else:
+        prompt_text = raw_prompt
+
+    negative_text = job.get("negative_prompt", "mouth movement, cartoon, anime, illustration, 3d render, plastic, painting, blurry, deformed")
+
+    # Encode positive prompt
+    tokens_pos = loaded["clip"].tokenize(prompt_text)
+    cond_pos = loaded["clip"].encode_from_tokens_scheduled(tokens_pos)
     positive = []
-    for item in cond:
+    for item in cond_pos:
         c = item[1].copy()
         c["frame_rate"] = 24.0
         positive.append([item[0], c])
+
+    # Encode negative prompt
+    tokens_neg = loaded["clip"].tokenize(negative_text)
+    cond_neg = loaded["clip"].encode_from_tokens_scheduled(tokens_neg)
+    negative = []
+    for item in cond_neg:
+        c = item[1].copy()
+        c["frame_rate"] = 24.0
+        negative.append([item[0], c])
 
     latent = _pin_reference_border(loaded, frames, width, height, window.get("mask"))
 
     steps = int(job.get("steps", 6))
     seed = int(job.get("seed", 42))
     denoise = float(job.get("denoise", 0.40))
-    print(f"Sampling {steps} steps (LTX-2.5 Turbo Refiner, denoise {denoise:.2f}, seed {seed})", flush=True)
+    cfg = float(job.get("cfg", 1.0))
+    print(f"Sampling {steps} steps (BFS Head Swap, denoise {denoise:.2f}, cfg {cfg:.1f}, seed {seed})", flush=True)
 
-    guider = loaded["guider"].execute(loaded["base_model"], positive)[0]
+    if cfg > 1.0 and "cfg_guider" in loaded and negative:
+        guider = loaded["cfg_guider"].execute(loaded["base_model"], positive, negative, cfg)[0]
+    else:
+        guider = loaded["guider"].execute(loaded["base_model"], positive)[0]
+
     sigmas = loaded["scheduler"].execute(loaded["base_model"], "simple", steps, denoise)[0]
-    sampler = loaded["sampler"].execute("euler")[0]
+    try:
+        sampler = loaded["sampler"].execute("euler_ancestral")[0]
+    except Exception:
+        sampler = loaded["sampler"].execute("euler")[0]
     noise = loaded["noise"].execute(seed)[0]
     sampled = loaded["sample"].execute(noise, guider, sampler, sigmas, latent)[0]
 

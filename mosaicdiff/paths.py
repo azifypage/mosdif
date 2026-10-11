@@ -10,7 +10,7 @@ APP_DIR_NAME = "MosaicDiff"
 # Names used when someone drops the weights next to the installed program.
 BUNDLED_NAMES = {
     "unet": "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",
-    "lora": "lora.safetensors",
+    "lora": "head_swap_ltx25_r128_v1.1.safetensors",
     "clip": "gemma4_12b_ltx25_uncensored-int8.safetensors",
     "vae": "ltx25_uncensored_video_vae.safetensors",
 }
@@ -22,8 +22,8 @@ LOCAL_DEFAULTS = {
 }
 
 MODEL_LABELS = {
-    "unet": "LTX-2.5 Stubelius Remix v1 DiT",
-    "lora": "Optional LoRA (Baked into GGUF by default)",
+    "unet": "LTX-2.5 DiT Model",
+    "lora": "BFS Head Swap LoRA (Alissonerdx v1.1)",
     "clip": "Gemma-4 LTX-2.5 Text Encoder",
     "vae": "LTX-2.5 Video VAE",
     "comfy_python": "ComfyUI Python",
@@ -78,8 +78,10 @@ ALTERNATIVE_FILENAMES = {
     "vsr": ["basicvsr.pth", "lada_mosaic_restoration_model_generic_v1.2.pth"],
     "detector": ["rfdetr.onnx", "rfdetr-v6.onnx", "rfdetr-v6-large.onnx"],
     "unet": [
+        "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
         "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",
         "ltx2.5-Stubelius_remix_v1_Q4_K_S.gguf",
+        "ltx-2.5-22b-distilled-transformer.safetensors",
         "ltx2.5-Stubelius_remix_beta2_int8_convrot.safetensors",
         "ltx25StubeliusRemix_beta2Int8.safetensors",
         "ltx2.5-Stubelius_remix_v1_bf16.safetensors",
@@ -94,7 +96,14 @@ ALTERNATIVE_FILENAMES = {
         "unet.safetensors",
         "10Eros_Max_h3_TURBO-hybrid_beta5_int8.safetensors",
     ],
-    "lora": ["lora.safetensors"],
+    "lora": [
+        "head_swap_ltx25_r128_v1.1.safetensors",
+        "head_swap_ltx25_r64_v1.1.safetensors",
+        "head_swap_ltx25_r128_v1.safetensors",
+        "head_swap_ltx25_r64_v1.safetensors",
+        "head_swap_v3_rank_64.safetensors",
+        "lora.safetensors",
+    ],
     "clip": [
         "gemma4_12b_ltx25_uncensored-int8.safetensors",
         "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",

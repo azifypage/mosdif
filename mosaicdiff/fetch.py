@@ -24,6 +24,11 @@ _REMOTE = {
         "ltx2.5-Stubelius_remix_v1_int8_convrot.safetensors",
         None,
     ),
+    "lora": (
+        "Alissonerdx/BFS-Best-Face-Swap-Video",
+        "ltx-2.5/head_swap_ltx25_r128_v1.1.safetensors",
+        None,
+    ),
     "clip": (
         "ChrisColeTech/LTX-2.5-uncensored-v1.1-FP8",
         "split/text_encoders/gemma4_12b_ltx25_uncensored-int8.safetensors",
@@ -220,9 +225,9 @@ def ensure_weights(settings: Settings, log, cancel: threading.Event, progress=No
 
     lora = settings.resolved("lora")
     if lora.is_file():
-        log(f"Using optional LoRA: {lora.name}")
+        log(f"Using BFS Head Swap LoRA: {lora.name}")
     else:
-        log("Base LTX-2.5 model has baked-in Eros10 & DMD LoRAs. No extra LoRA required.")
+        log("Notice: BFS Head Swap LoRA not found, running base model.")
 
     missing = settings.missing()
     if missing:

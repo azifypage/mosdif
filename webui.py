@@ -60,7 +60,7 @@ def check_models_status() -> str:
             size_str = f"{size_mb / 1024:.2f} GB" if size_mb >= 1024 else f"{size_mb:.1f} MB"
             lines.append(f"-  **{name}**: `{resolved_path}` ({size_str})")
         elif key == "lora":
-            lines.append(f"- ℹ️ **{name}**: *Opsional (Sudah terpasang di dalam GGUF checkpoint)*")
+            lines.append(f"- ⚠️ **{name}**: *Belum diunduh (Disarankan untuk Head Swap)* (`{resolved_path}`)")
         else:
             lines.append(f"- ❌ **{name}**: *Belum ditemukan* (`{resolved_path}`)")
     

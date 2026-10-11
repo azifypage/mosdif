@@ -17,8 +17,12 @@ from mosaicdiff.paths import (
     settings_path,
 )
 
+DEFAULT_PROMPT = "head_swap:\nFACE:\nPhotorealistic human face, natural skin texture, sharp detailed eyes."
+DEFAULT_NEGATIVE = "mouth movement, cartoon, anime, illustration, 3d render, plastic, painting, blurry, deformed"
+
 PATH_KEYS = (
     "unet",
+    "lora",
     "clip",
     "vae",
     "comfy_python",
@@ -35,8 +39,10 @@ class Settings:
     h3_steps: int = 6
     compare: bool = False
     prompt: str = ""
+    negative_prompt: str = ""
     seed: int = 42
-    denoise: float = 0.45
+    denoise: float = 0.40
+    lora_strength: float = 0.80
     paths: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -90,7 +96,7 @@ class Settings:
 
     def missing(self) -> list[tuple[str, Path]]:
         gone = []
-        for key in ("unet", "clip", "vae"):
+        for key in ("unet", "lora", "clip", "vae"):
             path = self.resolved(key)
             if not path.exists():
                 gone.append((MODEL_LABELS.get(key, key), path))
@@ -105,8 +111,10 @@ class Settings:
             "h3_steps": self.h3_steps,
             "compare": self.compare,
             "prompt": self.prompt,
+            "negative_prompt": self.negative_prompt,
             "seed": self.seed,
             "denoise": self.denoise,
+            "lora_strength": self.lora_strength,
             "paths": self.paths,
         }
         settings_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -134,8 +142,10 @@ class Settings:
             h3_steps=int(data.get("h3_steps") or 6),
             compare=False,
             prompt=str(data.get("prompt") or ""),
+            negative_prompt=str(data.get("negative_prompt") or ""),
             seed=int(data.get("seed") or 42),
-            denoise=float(data.get("denoise") or 0.45),
+            denoise=float(data.get("denoise") or 0.40),
+            lora_strength=float(data.get("lora_strength") or 0.80),
             paths={key: str(value) for key, value in dict(data.get("paths") or {}).items()},
         )
         settings.h3_seconds = min(15, max(1, settings.h3_seconds))

@@ -26,13 +26,9 @@ from mosaicdiff.geometry import (
 from mosaicdiff.head_detector import HeadDetector, smooth_head_trajectory
 from mosaicdiff.align import HeadAligner
 from mosaicdiff.paths import nodes_dir, worker_script
-from mosaicdiff.settings import Settings
+from mosaicdiff.settings import DEFAULT_NEGATIVE, DEFAULT_PROMPT, Settings
 from mosaicdiff.videoio import VideoWriter, copy_audio, open_capture
 
-DEFAULT_PROMPT = (
-    "photorealistic face and head, natural hair texture, sharp focus, "
-    "4k photorealistic, seamless skin tone blending, realistic lighting, detailed skin"
-)
 PROMPT = DEFAULT_PROMPT
 
 
@@ -288,20 +284,33 @@ def _h3(source, comp_path, destination, settings: Settings, crop, boxes, fps, lo
 
         lora_target = settings.resolved("lora")
         user_prompt = (getattr(settings, "prompt", "") or "").strip()
-        effective_prompt = user_prompt if user_prompt else DEFAULT_PROMPT
+        if not user_prompt:
+            effective_prompt = DEFAULT_PROMPT
+        elif not user_prompt.lower().startswith("head_swap:") and not user_prompt.lower().startswith("head swap"):
+            effective_prompt = f"head_swap:\nFACE:\n{user_prompt}"
+        else:
+            effective_prompt = user_prompt
+
+        user_negative = (getattr(settings, "negative_prompt", "") or "").strip()
+        effective_negative = user_negative if user_negative else DEFAULT_NEGATIVE
+
         effective_seed = int(getattr(settings, "seed", 42))
-        effective_denoise = float(getattr(settings, "denoise", 0.45))
-        log(f"LTX-2.5 Refiner: Denoise={effective_denoise:.2f} | Steps={settings.ltx_steps} | Seed={effective_seed}")
-        log(f"LTX-2.5 Prompt: '{effective_prompt}'")
+        effective_denoise = float(getattr(settings, "denoise", 0.40))
+        effective_lora_strength = float(getattr(settings, "lora_strength", 0.80))
+        log(f"LTX-2.5 Refiner: Denoise={effective_denoise:.2f} | LoRA Strength={effective_lora_strength:.2f} | Steps={settings.ltx_steps} | Seed={effective_seed}")
+        log(f"LTX-2.5 Positive Prompt:\n{effective_prompt}")
+        log(f"LTX-2.5 Negative Prompt:\n{effective_negative}")
 
         job = {
             "comfy_root": str(comfy_root),
             "nodes_dir": str(nodes_dir()),
             "unet": str(settings.resolved("unet")),
             "lora": str(lora_target) if lora_target.is_file() else None,
+            "lora_strength": effective_lora_strength,
             "clip": str(settings.resolved("clip")),
             "video_vae": str(settings.resolved("vae")),
             "prompt": effective_prompt,
+            "negative_prompt": effective_negative,
             "seed": effective_seed,
             "steps": int(getattr(settings, "ltx_steps", getattr(settings, "h3_steps", 6))),
             "denoise": effective_denoise,
