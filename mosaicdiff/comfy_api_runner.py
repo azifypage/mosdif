@@ -642,13 +642,37 @@ def run_comfy_workflow(
         selected = found_videos[0]
 
     subfolder, filename = selected
-    out_video_path = c_root / "output" / subfolder / filename
 
-    log_cb(f"Video hasil terpilih: {out_video_path.name}")
-    for subf, fname in found_videos:
-        fpath = c_root / "output" / subf / fname
-        if fpath.is_file():
-            log_cb(f"  🎬 File tersedia: {fpath.name} ({fpath.stat().st_size / (1024*1024):.2f} MB)")
+    # Resilient path resolution: direct path, recursive match, or latest video in output
+    resolved_file = None
+    direct_path = c_root / "output" / subfolder / filename
+    if direct_path.is_file():
+        resolved_file = direct_path
+    else:
+        # Search anywhere under c_root / "output" for matching filename
+        matches = [p for p in (c_root / "output").glob(f"**/{filename}") if p.is_file() and p.stat().st_size > 0]
+        if matches:
+            resolved_file = matches[0]
+        else:
+            # Fallback to the newest video in c_root / "output"
+            recent_vids = sorted(
+                [
+                    p for p in (c_root / "output").glob("**/*")
+                    if p.suffix.lower() in [".mp4", ".mkv", ".mov", ".webm"] and p.is_file() and p.stat().st_size > 0
+                ],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if recent_vids:
+                resolved_file = recent_vids[0]
+
+    if resolved_file is None or not resolved_file.is_file():
+        raise FileNotFoundError(f"File video hasil '{filename}' tidak ditemukan di {c_root / 'output'}")
+
+    out_video_path = resolved_file
+
+    log_cb(f"Video hasil terpilih: {out_video_path.name} ({out_video_path.stat().st_size / (1024*1024):.2f} MB)")
+    log_cb(f"  📍 Lokasi file: {out_video_path}")
 
     if dest_file:
         dst = Path(dest_file).resolve()
