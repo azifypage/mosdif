@@ -363,10 +363,7 @@
         "480",
         0
       ],
-      "text": [
-        "445",
-        0
-      ]
+      "text": "BFS Head Swap"
     },
     "class_type": "AddLabel",
     "_meta": {
@@ -385,16 +382,6 @@
   "446": {
     "inputs": {
       "clip_name": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
-      "type": "ltxv"
-    },
-    "class_type": "CLIPLoader",
-    "_meta": {
-      "title": "CLIPLoader"
-    }
-  },
-  "607": {
-    "inputs": {
-      "clip_name": "qwen3-vl-4b-heretic_int8_dynamic_convrot.safetensors",
       "type": "ltxv"
     },
     "class_type": "CLIPLoader",
@@ -426,57 +413,11 @@
         "446",
         0
       ],
-      "text": [
-        "445",
-        0
-      ]
+      "text": "head_swap:\nFACE:\nPhotorealistic human face, natural skin texture, sharp detailed eyes, realistic lighting"
     },
     "class_type": "CLIPTextEncode",
     "_meta": {
       "title": "Positive Prompt"
-    }
-  },
-  "447": {
-    "inputs": {
-      "video": 2048,
-      "audio": "on",
-      "clip": [
-        "607",
-        0
-      ],
-      "image": [
-        "492",
-        0
-      ],
-      "prompt": [
-        "567",
-        0
-      ]
-    },
-    "class_type": "TextGenerate",
-    "_meta": {
-      "title": "TextGenerate"
-    }
-  },
-  "445": {
-    "inputs": {
-      "source": [
-        "447",
-        0
-      ]
-    },
-    "class_type": "PreviewAny",
-    "_meta": {
-      "title": "Prompt Preview"
-    }
-  },
-  "567": {
-    "inputs": {
-      "value": "Analyze only the visible face and head.\n\nDescribe only the most important visible identity traits.\n\nFor humans, include:\n\n* apparent gender\n* approximate age\n* skin tone\n* eye color\n* hair color\n* basic hairstyle\n* one distinctive facial feature only if clearly relevant\n\nDo not mention absent features such as \"no facial hair\".\nDo not describe clothing, body, pose, expression, background, lighting, camera, or minor facial anatomy.\n\nFor non-human subjects, briefly state the subject type and only the most important visible head traits.\n\nKeep the description very short, approximately 8\u201320 words.\n\nOUTPUT EXACTLY ONCE.\n\nUse exactly this structure:\n\nhead_swap:\nFACE: <one short English sentence>\n\nNever repeat the output.\nNever generate a second head_swap block.\nNever generate a second FACE block.\nNever provide multiple candidates or alternatives.\nDo not add blank lines.\nDo not add explanations or extra text.\nImmediately stop generating after the period at the end of line 3.\n\nExample:\n\nhead_swap:\nFACE:\nFemale, pale skin, approximately 20\u201330 years old, red eyes, long black hair.\n"
-    },
-    "class_type": "PrimitiveStringMultiline",
-    "_meta": {
-      "title": "Prompt Template"
     }
   },
   "473": {
@@ -615,7 +556,7 @@
   },
   "444": {
     "inputs": {
-      "text": "mouth movement",
+      "text": "mouth movement, cartoon, anime, illustration, 3d render, plastic, painting, blurry, deformed",
       "clip": [
         "446",
         0
@@ -957,7 +898,7 @@
   },
   "610": {
     "inputs": {
-      "lora_name": "head_swap_ltx25_v1_1_r128.safetensors",
+      "lora_name": "head_swap_ltx25_r128_v1.1.safetensors",
       "strength_model": 0.8,
       "model": [
         "443",

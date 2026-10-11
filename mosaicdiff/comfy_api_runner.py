@@ -119,73 +119,58 @@ def prepare_comfy_inputs(
     return v_src.name, h_src.name
 
 
+OFFICIAL_BFS_API_WORKFLOW = (
+    Path(__file__).resolve().parent.parent / "workflow_ltx2.5_v1.1_head_swap_drag_and_drop.api.json"
+)
+
+
+def load_bfs_prompt(
+    api_path: str | Path | None = None,
+    log_cb=print,
+) -> dict:
+    """Load the official BFS API prompt graph directly from disk.
+    
+    This is the primary deterministic execution path: it directly loads the
+    validated 56-node graph without relying on third-party converter servers,
+    fragile network calls, or guesswork fallbacks.
+    """
+    if api_path is None:
+        target = OFFICIAL_BFS_API_WORKFLOW
+        if not target.is_file():
+            target = Path("/content/mosdif/workflow_ltx2.5_v1.1_head_swap_drag_and_drop.api.json")
+    else:
+        target = Path(api_path).resolve()
+        if not target.name.endswith(".api.json"):
+            companion = target.with_name(target.stem + ".api.json")
+            if companion.is_file():
+                target = companion
+
+    if not target.is_file():
+        raise FileNotFoundError(
+            f"Official BFS API workflow file not found at: {target}\n"
+            f"Pastikan repository mosdif ter-clone dengan lengkap."
+        )
+
+    with open(target, "r", encoding="utf-8") as f:
+        prompt_dict = json.load(f)
+
+    if not isinstance(prompt_dict, dict) or not any("class_type" in v for v in prompt_dict.values()):
+        raise ComfyAPIError(f"Format file API prompt tidak valid: {target}")
+
+    if log_cb:
+        log_cb(f"[OK] Berhasil memuat workflow resmi BFS API: {target.name} ({len(prompt_dict)} nodes)")
+
+    return prompt_dict
+
+
 def convert_workflow_to_prompt(
-    workflow_path: str | Path,
+    workflow_path: str | Path | None = None,
     host: str = "127.0.0.1",
     port: int = 8188,
-    log_cb=None,
+    log_cb=print,
 ) -> dict:
-    """Load API prompt format for execution.
-    
-    Prefers pre-compiled .api.json file directly from disk, eliminating network calls,
-    conversion errors, and any dependency on server-side converter endpoints.
-    """
-    wf_path = Path(workflow_path).resolve()
-
-    # 1. Check for pre-compiled companion .api.json file
-    api_candidates = [
-        wf_path.with_name(wf_path.stem + ".api.json"),
-        wf_path.parent / (wf_path.name.replace(".json", ".api.json")),
-        Path(__file__).resolve().parent.parent / "workflow_ltx2.5_v1.1_head_swap_drag_and_drop.api.json",
-        Path("/content/mosdif/workflow_ltx2.5_v1.1_head_swap_drag_and_drop.api.json"),
-    ]
-    for cand in api_candidates:
-        if cand.is_file():
-            try:
-                with open(cand, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and any("class_type" in v for v in data.values()):
-                    if log_cb:
-                        log_cb(f"Memuat pre-compiled API prompt: {cand.name}")
-                    return data
-            except Exception:
-                pass
-
-    if not wf_path.is_file():
-        raise FileNotFoundError(f"Workflow file tidak ditemukan: {wf_path}")
-
-    with open(wf_path, "r", encoding="utf-8") as f:
-        wf_json = json.load(f)
-
-    # 2. Check if the provided file is already in API format
-    if isinstance(wf_json, dict) and any("class_type" in v for v in wf_json.values()):
-        return wf_json
-
-    # 3. Try server-side converter endpoint (comfyui-workflow-to-api-converter-endpoint)
-    conv_url = f"http://{host}:{port}/workflow/convert"
-    try:
-        data = json.dumps(wf_json).encode("utf-8")
-        req = urllib.request.Request(
-            conv_url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            if isinstance(res, dict) and "prompt" in res:
-                return res["prompt"]
-            if isinstance(res, dict) and any("class_type" in v for v in res.values()):
-                return res
-    except urllib.error.HTTPError as http_err:
-        err_msg = http_err.read().decode("utf-8", errors="replace")
-        raise ComfyAPIError(f"ComfyUI /workflow/convert gagal (HTTP {http_err.code}):\n{err_msg}") from http_err
-    except Exception as exc:
-        raise ComfyAPIError(f"Gagal menghubungi /workflow/convert: {exc}") from exc
-
-    raise ComfyAPIError(
-        f"Gagal mengonversi workflow UI ke format API prompt.\n"
-        "Pastikan node 'comfyui-workflow-to-api-converter-endpoint' sudah terpasang di ComfyUI/custom_nodes/."
-    )
+    """Primary loader alias for backwards compatibility."""
+    return load_bfs_prompt(api_path=workflow_path, log_cb=log_cb)
 
 
 def patch_bfs_prompt(
@@ -204,7 +189,6 @@ def patch_bfs_prompt(
     patched = json.loads(json.dumps(prompt_dict))  # deep copy
 
     v_filename, h_filename = prepare_comfy_inputs(comfy_root, video_input_path, head_image_path)
-    video_input_str = str(Path(video_input_path).resolve())
 
     # Format BFS Head Swap prompt
     p_text = prompt_text.strip()
@@ -216,7 +200,10 @@ def patch_bfs_prompt(
     else:
         pos_prompt = p_text
 
-    neg_prompt = negative_prompt_text.strip() or "mouth movement, cartoon, anime, illustration, 3d render, plastic, painting, blurry, deformed"
+    neg_prompt = (
+        negative_prompt_text.strip()
+        or "mouth movement, cartoon, anime, illustration, 3d render, plastic, painting, blurry, deformed"
+    )
 
     # Check available lora files in ComfyUI
     lora_dir = Path(comfy_root).resolve() / "models" / "loras"
@@ -243,7 +230,7 @@ def patch_bfs_prompt(
         if ctype in ("LoraLoaderModelOnly", "LoraLoader") and "head_swap" in str(inputs.get("lora_name", "")).lower():
             if "strength_model" in inputs:
                 inputs["strength_model"] = float(lora_strength)
-            # Sync lora_name to existing file
+            # Use official canonical file or matching file on disk
             cur_lora = inputs.get("lora_name", "")
             if cur_lora not in available_loras:
                 for cand in available_loras:
@@ -252,11 +239,11 @@ def patch_bfs_prompt(
                         break
 
         # 4. Positive Prompt (CLIPTextEncode, Node 448)
-        if ctype == "CLIPTextEncode" and ("Positive" in title or "head_swap" in str(inputs.get("text", "")).lower()):
+        if ctype == "CLIPTextEncode" and ("Positive" in title or nid == "448"):
             inputs["text"] = pos_prompt
 
         # 5. Negative Prompt (CLIPTextEncode, Node 444)
-        if ctype == "CLIPTextEncode" and ("Negative" in title or "mouth movement" in str(inputs.get("text", "")).lower()):
+        if ctype == "CLIPTextEncode" and ("Negative" in title or nid == "444"):
             inputs["text"] = neg_prompt
 
         # 6. Samplers & Schedulers
@@ -269,23 +256,14 @@ def patch_bfs_prompt(
 
         # 7. Second Pass & Comparison Video Handling
         if not enable_second_pass:
-            if ctype == "SaveVideo" and "Second Pass" in title:
+            if ctype == "SaveVideo" and ("Second Pass" in title or nid == "75"):
                 nodes_to_remove.append(nid)
-            elif ctype == "VHS_VideoCombine" and ("comparison" in str(inputs).lower() or "comparison" in title.lower()):
+            elif ctype == "VHS_VideoCombine" and ("comparison" in str(inputs).lower() or nid == "491"):
                 nodes_to_remove.append(nid)
 
-    # Prune second pass save nodes if disabled so ComfyUI doesn't execute them
+    # Prune second pass save nodes if disabled so ComfyUI only generates first pass
     for nid in nodes_to_remove:
         patched.pop(nid, None)
-
-    # 8. Clean up Qwen auto-prompt subgraph if Qwen3-VL model is not downloaded
-    qwen_model_path = Path(comfy_root).resolve() / "models" / "text_encoders" / "qwen3-vl-4b-heretic_int8_dynamic_convrot.safetensors"
-    if not qwen_model_path.is_file():
-        qwen_nodes = ["445", "447", "607", "608", "602", "563", "645", "567"]
-        for qnid in qwen_nodes:
-            patched.pop(qnid, None)
-        if "600" in patched and "inputs" in patched["600"]:
-            patched["600"]["inputs"]["text"] = "BFS Head Swap"
 
     return patched
 

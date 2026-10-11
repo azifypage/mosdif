@@ -20,7 +20,7 @@ from mosaicdiff.settings import Settings
 # repo, filename inside the repo, optional git revision
 _REMOTE = {
     "unet": (
-        "PulpCut/LTX-2.5-INT8-ConvRot-safetensors",
+        "osantinello/LTX25_Models",
         "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
         None,
     ),
@@ -30,13 +30,13 @@ _REMOTE = {
         None,
     ),
     "clip": (
-        "Lightricks/LTX-2.5",
-        "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+        "osantinello/LTX25_Models",
+        "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
         None,
     ),
     "vae": (
-        "Lightricks/LTX-2.5",
-        "vae/ltx-2.5-video-vae-bf16.safetensors",
+        "osantinello/LTX25_Models",
+        "ltx-2.5-video-vae-bf16.safetensors",
         None,
     ),
 }
