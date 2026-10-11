@@ -123,16 +123,45 @@ def convert_workflow_to_prompt(
     workflow_path: str | Path,
     host: str = "127.0.0.1",
     port: int = 8188,
+    log_cb=None,
 ) -> dict:
-    """Convert UI workflow format to API prompt format using server /workflow/convert endpoint."""
+    """Load API prompt format for execution.
+    
+    Prefers pre-compiled .api.json file directly from disk, eliminating network calls,
+    conversion errors, and any dependency on server-side converter endpoints.
+    """
     wf_path = Path(workflow_path).resolve()
+
+    # 1. Check for pre-compiled companion .api.json file
+    api_candidates = [
+        wf_path.with_name(wf_path.stem + ".api.json"),
+        wf_path.parent / (wf_path.name.replace(".json", ".api.json")),
+        Path(__file__).resolve().parent.parent / "workflow_ltx2.5_v1.1_head_swap_drag_and_drop.api.json",
+        Path("/content/mosdif/workflow_ltx2.5_v1.1_head_swap_drag_and_drop.api.json"),
+    ]
+    for cand in api_candidates:
+        if cand.is_file():
+            try:
+                with open(cand, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and any("class_type" in v for v in data.values()):
+                    if log_cb:
+                        log_cb(f"Memuat pre-compiled API prompt: {cand.name}")
+                    return data
+            except Exception:
+                pass
+
     if not wf_path.is_file():
         raise FileNotFoundError(f"Workflow file tidak ditemukan: {wf_path}")
 
     with open(wf_path, "r", encoding="utf-8") as f:
         wf_json = json.load(f)
 
-    # 1. Try server-side converter endpoint (comfyui-workflow-to-api-converter-endpoint)
+    # 2. Check if the provided file is already in API format
+    if isinstance(wf_json, dict) and any("class_type" in v for v in wf_json.values()):
+        return wf_json
+
+    # 3. Try server-side converter endpoint (comfyui-workflow-to-api-converter-endpoint)
     conv_url = f"http://{host}:{port}/workflow/convert"
     try:
         data = json.dumps(wf_json).encode("utf-8")
@@ -147,14 +176,11 @@ def convert_workflow_to_prompt(
                 return res["prompt"]
             if isinstance(res, dict) and any("class_type" in v for v in res.values()):
                 return res
+    except urllib.error.HTTPError as http_err:
+        err_msg = http_err.read().decode("utf-8", errors="replace")
+        raise ComfyAPIError(f"ComfyUI /workflow/convert gagal (HTTP {http_err.code}):\n{err_msg}") from http_err
     except Exception as exc:
-        pass
-
-    # 2. Check if workflow has pre-generated extra.prompt
-    if "extra" in wf_json and isinstance(wf_json["extra"], dict) and "prompt" in wf_json["extra"]:
-        candidate = wf_json["extra"]["prompt"]
-        if isinstance(candidate, dict) and len(candidate) > 10:
-            return candidate
+        raise ComfyAPIError(f"Gagal menghubungi /workflow/convert: {exc}") from exc
 
     raise ComfyAPIError(
         f"Gagal mengonversi workflow UI ke format API prompt.\n"
@@ -258,6 +284,8 @@ def patch_bfs_prompt(
         qwen_nodes = ["445", "447", "607", "608", "602", "563", "645", "567"]
         for qnid in qwen_nodes:
             patched.pop(qnid, None)
+        if "600" in patched and "inputs" in patched["600"]:
+            patched["600"]["inputs"]["text"] = "BFS Head Swap"
 
     return patched
 
@@ -283,8 +311,18 @@ def run_comfy_workflow(
 
     req_data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=req_data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req) as resp:
-        res = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as http_err:
+        err_body = http_err.read().decode("utf-8", errors="replace")
+        try:
+            err_json = json.loads(err_body)
+            err_details = json.dumps(err_json, indent=2)
+        except Exception:
+            err_details = err_body
+        log_cb(f"❌ ComfyUI /prompt menolak workflow (HTTP {http_err.code}):\n{err_details}")
+        raise ComfyAPIError(f"ComfyUI /prompt rejected with HTTP {http_err.code}:\n{err_details}") from http_err
 
     prompt_id = res.get("prompt_id")
     if not prompt_id:
