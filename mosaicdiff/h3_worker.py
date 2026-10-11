@@ -27,7 +27,11 @@ def _boot() -> None:
     comfy.options.args_parsing = False
     import comfy.cli_args as cli_args
 
-    cli_args.args.use_sage_attention = True
+    try:
+        import sageattention  # noqa: F401
+        cli_args.args.use_sage_attention = True
+    except Exception:
+        cli_args.args.use_sage_attention = False
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     # The allocator is chosen on the first torch import. ComfyUI sets this
     # before it loads any model.
@@ -35,7 +39,10 @@ def _boot() -> None:
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     if os.name == "nt":
         os.environ["MIMALLOC_PURGE_DELAY"] = "0"
-    import cuda_malloc  # noqa: F401
+    try:
+        import cuda_malloc  # noqa: F401
+    except ImportError:
+        pass
 
     if not cli_args.enables_dynamic_vram():
         return

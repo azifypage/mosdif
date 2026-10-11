@@ -24,7 +24,11 @@ def _boot() -> None:
     comfy.options.args_parsing = False
     import comfy.cli_args as cli_args
 
-    cli_args.args.use_sage_attention = True
+    try:
+        import sageattention  # noqa: F401
+        cli_args.args.use_sage_attention = True
+    except Exception:
+        cli_args.args.use_sage_attention = False
     logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
     if os.name == "nt" and cli_args.args.cuda_device is None and os.environ.get("CUDA_VISIBLE_DEVICES") is None:
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
