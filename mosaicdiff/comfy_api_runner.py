@@ -23,6 +23,43 @@ class ComfyAPIError(RuntimeError):
     pass
 
 
+REQUIRED_BFS_MODELS = [
+    (
+        "diffusion_models",
+        "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+        "https://huggingface.co/osantinello/LTX25_Models/resolve/main/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+    ),
+    (
+        "loras",
+        "head_swap_ltx25_r128_v1.1.safetensors",
+        "https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap-Video/resolve/main/ltx-2.5/head_swap_ltx25_r128_v1.1.safetensors",
+    ),
+    (
+        "text_encoders",
+        "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+        "https://huggingface.co/osantinello/LTX25_Models/resolve/main/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+    ),
+    (
+        "vae",
+        "ltx-2.5-video-vae-bf16.safetensors",
+        "https://huggingface.co/osantinello/LTX25_Models/resolve/main/ltx-2.5-video-vae-bf16.safetensors",
+    ),
+    (
+        "vae",
+        "ltx-2.5-audio-vae-bf16.safetensors",
+        "https://huggingface.co/osantinello/LTX25_Models/resolve/main/ltx-2.5-audio-vae-bf16.safetensors",
+    ),
+]
+
+SECOND_PASS_MODELS = [
+    (
+        "latent_upscale_models",
+        "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+        "https://huggingface.co/osantinello/LTX25_Models/resolve/main/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+    ),
+]
+
+
 def is_comfy_running(host: str = "127.0.0.1", port: int = 8188) -> bool:
     """Check if ComfyUI server is actively responding on port 8188."""
     url = f"http://{host}:{port}/system_stats"
@@ -34,6 +71,120 @@ def is_comfy_running(host: str = "127.0.0.1", port: int = 8188) -> bool:
         return False
 
 
+def stop_comfy_daemon(
+    host: str = "127.0.0.1",
+    port: int = 8188,
+    log_cb=print,
+) -> None:
+    """Stop running ComfyUI daemon so it can refresh and re-index models."""
+    if not is_comfy_running(host, port):
+        return
+    log_cb("Restarting ComfyUI daemon to index newly available models...")
+    if sys.platform != "win32":
+        try:
+            subprocess.run(["pkill", "-9", "-f", "ComfyUI/main.py"], stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        try:
+            subprocess.run(["fuser", "-k", "-9", f"{port}/tcp"], stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    time.sleep(2.0)
+
+
+def ensure_bfs_models(
+    comfy_root: str | Path = "/content/ComfyUI",
+    enable_second_pass: bool = False,
+    log_cb=print,
+) -> bool:
+    """Verify and auto-download any missing official BFS model weights.
+    
+    Returns True if any model was newly downloaded or linked, indicating that
+    the ComfyUI daemon should be restarted to re-index its model catalog.
+    """
+    c_root = Path(comfy_root).resolve()
+    models_dir = c_root / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    targets = list(REQUIRED_BFS_MODELS)
+    if enable_second_pass:
+        targets.extend(SECOND_PASS_MODELS)
+
+    # Alternate local locations where weights might already reside
+    search_roots = [
+        Path("/content/mosdif/models"),
+        Path(__file__).resolve().parent.parent / "models",
+        Path.home() / ".cache" / "huggingface" / "hub",
+    ]
+
+    downloaded_any = False
+
+    for subf, fname, url in targets:
+        dest_dir = models_dir / subf
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = dest_dir / fname
+
+        # 1. Check if already present and non-empty (> 1MB)
+        if dest_file.is_file() and dest_file.stat().st_size > 1024 * 1024:
+            continue
+
+        # 2. Check alternate local directories
+        found_local = False
+        for s_root in search_roots:
+            cand = s_root / subf / fname
+            if not cand.is_file():
+                cand = s_root / fname
+            if cand.is_file() and cand.stat().st_size > 1024 * 1024:
+                log_cb(f"Linking local model {fname} -> models/{subf}/...")
+                try:
+                    if dest_file.is_symlink() or dest_file.is_file():
+                        dest_file.unlink()
+                    dest_file.symlink_to(cand)
+                    found_local = True
+                    downloaded_any = True
+                    break
+                except Exception:
+                    shutil.copy2(cand, dest_file)
+                    found_local = True
+                    downloaded_any = True
+                    break
+
+        if found_local:
+            continue
+
+        # 3. Download directly from high-speed public repository
+        log_cb(f"⚡ Mengunduh model pendukung ({fname})...")
+        downloaded_any = True
+
+        aria2_bin = shutil.which("aria2c")
+        if aria2_bin:
+            cmd = [
+                aria2_bin,
+                "-c",
+                "-x", "16",
+                "-s", "16",
+                "-k", "1M",
+                "-d", str(dest_dir),
+                "-o", fname,
+                url,
+            ]
+            res = subprocess.run(cmd)
+            if res.returncode != 0:
+                raise ComfyAPIError(f"Gagal mengunduh {fname} via aria2c (exit code {res.returncode})")
+        else:
+            req = urllib.request.Request(url, headers={"User-Agent": "MosaicDiff-Downloader"})
+            with urllib.request.urlopen(req) as resp, open(dest_file, "wb") as out_f:
+                shutil.copyfileobj(resp, out_f)
+
+        if not dest_file.is_file() or dest_file.stat().st_size < 1024 * 1024:
+            raise ComfyAPIError(f"Model {fname} gagal diunduh atau ukuran file korup.")
+
+        size_mb = dest_file.stat().st_size / (1024 * 1024)
+        log_cb(f"[OK] Model siap: {fname} ({size_mb:.1f} MB)")
+
+    return downloaded_any
+
+
 def start_comfy_daemon(
     comfy_root: str | Path = "/content/ComfyUI",
     python_bin: str = sys.executable,
@@ -41,8 +192,12 @@ def start_comfy_daemon(
     port: int = 8188,
     log_cb=print,
     timeout_sec: int = 60,
+    restart: bool = False,
 ) -> subprocess.Popen | None:
     """Ensure ComfyUI backend server is running in background."""
+    if restart:
+        stop_comfy_daemon(host, port, log_cb=log_cb)
+
     if is_comfy_running(host, port):
         log_cb(f"ComfyUI backend already running on http://{host}:{port}")
         return None
@@ -254,7 +409,15 @@ def patch_bfs_prompt(
         if ctype in ("BasicScheduler", "LTXVScheduler") and "steps" in inputs:
             inputs["steps"] = int(steps)
 
-        # 7. Second Pass & Comparison Video Handling
+        # 7. UNETLoader (Node 443) required weight_dtype
+        if ctype == "UNETLoader" or nid == "443":
+            inputs["weight_dtype"] = "default"
+
+        # 8. CLIPLoader (Node 446) required type
+        if ctype == "CLIPLoader" or nid == "446":
+            inputs.setdefault("type", "ltxv")
+
+        # 9. Second Pass & Comparison Video Handling
         if not enable_second_pass:
             if ctype == "SaveVideo" and ("Second Pass" in title or nid == "75"):
                 nodes_to_remove.append(nid)
