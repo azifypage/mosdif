@@ -25,15 +25,11 @@
   },
   "455": {
     "inputs": {
-      "values.c": "a * b + 1",
       "values.a": [
         "425",
         0
       ],
-      "values.b": [
-        "430",
-        0
-      ]
+      "expression": "a * b + 1"
     },
     "class_type": "ComfyMathExpression",
     "_meta": {
@@ -83,8 +79,6 @@
   },
   "435": {
     "inputs": {
-      "cfg": 1,
-      "rescale": 1,
       "model": [
         "474",
         0
@@ -96,7 +90,9 @@
       "negative": [
         "474",
         2
-      ]
+      ],
+      "audio_cfg": 1.0,
+      "video_cfg": 1.0
     },
     "class_type": "LTXVDualCFGGuider",
     "_meta": {
@@ -505,9 +501,6 @@
     "inputs": {
       "upscale_method": "lanczos",
       "keep_proportion": "resize",
-      "pad_feather": "0, 0, 0",
-      "crop": "center",
-      "pad_multiple": 32,
       "device": "cpu",
       "image": [
         "460",
@@ -520,7 +513,10 @@
       "height": [
         "464",
         1
-      ]
+      ],
+      "crop_position": "center",
+      "divisible_by": 32,
+      "pad_color": "0, 0, 0"
     },
     "class_type": "ImageResizeKJv2",
     "_meta": {
@@ -529,11 +525,11 @@
   },
   "457": {
     "inputs": {
-      "values.b": "a/2",
       "values.a": [
         "428",
         0
-      ]
+      ],
+      "expression": "a/2"
     },
     "class_type": "ComfyMathExpression",
     "_meta": {
@@ -579,9 +575,9 @@
   },
   "403": {
     "inputs": {
-      "mode": "3:4 (Portrait Standard)",
-      "round": 2,
-      "multiple": 32
+      "multiple": 32,
+      "aspect_ratio": "3:4 (Portrait Standard)",
+      "megapixels": 2
     },
     "class_type": "ResolutionSelector",
     "_meta": {
@@ -656,11 +652,11 @@
   },
   "458": {
     "inputs": {
-      "values.b": "a",
       "values.a": [
         "430",
         0
-      ]
+      ],
+      "expression": "a"
     },
     "class_type": "ComfyMathExpression",
     "_meta": {
@@ -669,11 +665,11 @@
   },
   "464": {
     "inputs": {
-      "values.b": "a/2",
       "values.a": [
         "429",
         0
-      ]
+      ],
+      "expression": "a/2"
     },
     "class_type": "ComfyMathExpression",
     "_meta": {
@@ -682,7 +678,7 @@
   },
   "431": {
     "inputs": {
-      "upscale_model": "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
+      "model_name": "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"
     },
     "class_type": "LatentUpscaleModelLoader",
     "_meta": {
@@ -691,8 +687,6 @@
   },
   "468": {
     "inputs": {
-      "cfg": 1,
-      "rescale": 1,
       "model": [
         "473",
         0
@@ -704,7 +698,9 @@
       "negative": [
         "473",
         2
-      ]
+      ],
+      "audio_cfg": 1.0,
+      "video_cfg": 1.0
     },
     "class_type": "LTXVDualCFGGuider",
     "_meta": {
@@ -717,14 +713,14 @@
       "height": 1024,
       "upscale_method": "lanczos",
       "keep_proportion": "resize",
-      "pad_feather": "0, 0, 0",
-      "crop": "center",
-      "pad_multiple": 2,
       "device": "cpu",
       "image": [
         "461",
         0
-      ]
+      ],
+      "crop_position": "center",
+      "divisible_by": 2,
+      "pad_color": "0, 0, 0"
     },
     "class_type": "ImageResizeKJv2",
     "_meta": {
