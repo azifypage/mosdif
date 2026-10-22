@@ -23,7 +23,7 @@ from mosaicdiff.geometry import (
     split_samples,
     stable_crop,
 )
-from mosaicdiff.head_detector import HeadDetector, smooth_head_trajectory
+from mosaicdiff.head_detector import HeadDetector, create_crop_head_mask, smooth_head_trajectory
 from mosaicdiff.align import HeadAligner
 from mosaicdiff.paths import nodes_dir, worker_script
 from mosaicdiff.settings import DEFAULT_NEGATIVE, DEFAULT_PROMPT, Settings
@@ -135,7 +135,7 @@ def process_video(
     log(f"LTX-2.5 Head crop {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]}")
 
     try:
-        _h3(source, comp_path, destination, settings, crop, grown, fps, log, progress, cancel)
+        _h3(source, comp_path, destination, settings, crop, head_boxes, grown, fps, log, progress, cancel)
     except Cancelled:
         comp_path.unlink(missing_ok=True)
         raise
@@ -175,7 +175,7 @@ def _detect_and_composite(
             ok, frame = capture.read()
             if not ok:
                 break
-            det = detector.detect_head(frame)
+            det = detector.detect_head(frame, need_mask=False)
             detections.append(det)
             seen += 1
             if count and seen % 10 == 0:
@@ -217,28 +217,44 @@ def _detect_and_composite(
     return head_boxes, width, height, fps, len(head_boxes)
 
 
-def _paste(frame: np.ndarray, patch: np.ndarray, box) -> np.ndarray:
-    x1, y1, x2, y2 = box
+def _paste(
+    frame: np.ndarray,
+    patch: np.ndarray,
+    crop_box: tuple[int, int, int, int],
+    head_box: tuple[int, int, int, int] | None = None,
+) -> np.ndarray:
+    """Paste only the feathered head/face area from ``patch`` onto the full video ``frame``."""
+    x1, y1, x2, y2 = crop_box
     x1 = max(0, x1)
     y1 = max(0, y1)
     x2 = min(frame.shape[1], x2)
     y2 = min(frame.shape[0], y2)
     if x2 <= x1 or y2 <= y1:
         return frame
+    cw = x2 - x1
+    ch = y2 - y1
     fitted = patch
-    if fitted.shape[1] != x2 - x1 or fitted.shape[0] != y2 - y1:
-        fitted = cv2.resize(fitted, (x2 - x1, y2 - y1), interpolation=cv2.INTER_LANCZOS4)
-    short = min(y2 - y1, x2 - x1)
-    falloff = max(24, min(round(short * 0.08), short // 5))
-    fade = edge_fade(y2 - y1, x2 - x1, falloff)
+    if fitted.shape[1] != cw or fitted.shape[0] != ch:
+        fitted = cv2.resize(fitted, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
+
+    fade = create_crop_head_mask((x1, y1, x2, y2), head_box)
     base = frame.copy()
     region = base[y1:y2, x1:x2].astype(np.float32)
-    mixed = region * (1.0 - fade) + fitted.astype(np.float32) * fade
+    patch_f32 = fitted.astype(np.float32)
+
+    # Gentle border-ring color/luminance harmonization
+    ring = (fade[:, :, 0] > 0.05) & (fade[:, :, 0] < 0.45)
+    if np.count_nonzero(ring) > 32:
+        diff = np.mean(region[ring] - patch_f32[ring], axis=0)
+        diff = np.clip(diff, -14.0, 14.0)
+        patch_f32 = np.clip(patch_f32 + diff, 0.0, 255.0)
+
+    mixed = region * (1.0 - fade) + patch_f32 * fade
     base[y1:y2, x1:x2] = np.clip(np.round(mixed), 0, 255).astype(np.uint8)
     return base
 
 
-def _h3(source, comp_path, destination, settings: Settings, crop, boxes, fps, log, progress, cancel) -> None:
+def _h3(source, comp_path, destination, settings: Settings, crop, head_boxes, boxes, fps, log, progress, cancel) -> None:
     present = [index for index, box in enumerate(boxes) if box is not None]
     first, last = present[0], present[-1]
     span = frames_at_h3_fps(last - first + 1, fps)
@@ -247,7 +263,7 @@ def _h3(source, comp_path, destination, settings: Settings, crop, boxes, fps, lo
     if not windows:
         raise RuntimeError("Bagian video yang terdeteksi kepala terlalu pendek (< 9 frame)")
     gen_w, gen_h = generation_size(crop[2] - crop[0], crop[3] - crop[1], settings.h3_resolution)
-    log(f"LTX-2.5 Diffusion pass, {len(windows)} sample(s), {gen_w}x{gen_h}")
+    log(f"LTX-2.5 Diffusion pass (Head Area Only), {len(windows)} sample(s), {gen_w}x{gen_h}")
     progress(0.45, "LTX-2.5 Head Diffusion")
     with tempfile.TemporaryDirectory(prefix="mosaicdiff-", dir=str(destination.parent)) as temp_name:
         temp = Path(temp_name)
@@ -257,12 +273,30 @@ def _h3(source, comp_path, destination, settings: Settings, crop, boxes, fps, lo
             context, overlap = fit_context(settings.h3_seconds, len(indices))
             out_dir = temp / f"window_{number:03d}"
             out_dir.mkdir()
+
+            # Build window-specific inpainting mask covering the head trajectory within crop
+            win_boxes = [head_boxes[idx] for idx in indices if idx < len(head_boxes) and head_boxes[idx] is not None]
+            mask_path = None
+            if win_boxes:
+                union_head = (
+                    min(b[0] for b in win_boxes),
+                    min(b[1] for b in win_boxes),
+                    max(b[2] for b in win_boxes),
+                    max(b[3] for b in win_boxes),
+                )
+                mask_arr = create_crop_head_mask(crop, union_head)[:, :, 0]
+                mask_u8 = np.clip(np.round(mask_arr * 255.0), 0, 255).astype(np.uint8)
+                mask_file = out_dir / "head_mask.png"
+                cv2.imwrite(str(mask_file), mask_u8)
+                mask_path = str(mask_file)
+
             specs.append(
                 {
                     "frame_indices": indices,
                     "width": gen_w,
                     "height": gen_h,
                     "crop": list(crop),
+                    "mask": mask_path,
                     "out_dir": str(out_dir),
                     "context_frames": context,
                     "context_overlap": overlap,
@@ -329,7 +363,8 @@ def _h3(source, comp_path, destination, settings: Settings, crop, boxes, fps, lo
                 if image.is_file():
                     pastes[int(frame_idx)] = image
         output_fps = H3_FPS if fps > H3_FPS + 0.05 else fps
-        _write_output(comp_path, destination, pastes, crop, output_fps, fps, len(boxes))
+        # Paste generated head region directly onto the original full video (source)
+        _write_output(source, destination, pastes, crop, head_boxes, output_fps, fps, len(boxes))
         if settings.compare:
             compare_path = destination.with_name(destination.stem + "_compare" + destination.suffix)
             try:
@@ -382,8 +417,8 @@ def _run_comfy(python: Path, job_path: Path, log, cancel) -> None:
         raise RuntimeError(f"LTX-2.5 diffusion process exited with status {code}")
 
 
-def _write_output(comp_path, destination, pastes, crop, output_fps, source_fps, frame_count: int) -> None:
-    capture, width, height, _fps, _count = open_capture(comp_path)
+def _write_output(source_path, destination, pastes, crop, head_boxes, output_fps, source_fps, frame_count: int) -> None:
+    capture, width, height, _fps, _count = open_capture(source_path)
     keep = set(frames_at_h3_fps(frame_count, source_fps)) if output_fps == H3_FPS else None
     writer = VideoWriter(destination, width, height, Fraction(output_fps).limit_denominator(1000))
     index = 0
@@ -396,10 +431,11 @@ def _write_output(comp_path, destination, pastes, crop, output_fps, source_fps, 
                 index += 1
                 continue
             image_path = pastes.get(index)
-            if image_path is not None:
+            hbox = head_boxes[index] if index < len(head_boxes) else None
+            if image_path is not None and hbox is not None:
                 patch = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
                 if patch is not None:
-                    frame = _paste(frame, patch, crop)
+                    frame = _paste(frame, patch, crop, head_box=hbox)
             writer.write(frame)
             index += 1
     finally:

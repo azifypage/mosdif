@@ -2,11 +2,15 @@
 
 Executes the official workflow_ltx2.5_v1.1_head_swap_drag_and_drop.json directly
 via ComfyUI's REST & WebSocket API without requiring a web browser interface.
+Detects and crops only the region around the identified head/face for generation,
+then composites the generated head seamlessly back onto the full original video.
 """
 
 from __future__ import annotations
 
+from fractions import Fraction
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -18,9 +22,15 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+from mosaicdiff.geometry import align_up
+
 
 class ComfyAPIError(RuntimeError):
     pass
+
+
+# Stores head-crop metadata between patch_bfs_prompt() and run_comfy_workflow()
+_ACTIVE_CROP_CONTEXT: dict[str, dict] = {}
 
 
 REQUIRED_BFS_MODELS = [
@@ -263,6 +273,314 @@ def start_comfy_daemon(
     raise ComfyAPIError(f"ComfyUI daemon failed to respond within {timeout_sec}s.")
 
 
+def prepare_head_crop_video(
+    video_input_path: str | Path,
+    comfy_root: str | Path = "/content/ComfyUI",
+    log_cb=print,
+) -> dict:
+    """Detect head/face across all video frames and write a cropped guide video containing ONLY the head region.
+
+    Returns a dictionary with crop coordinates, per-frame head boxes, and cropped video path so
+    the generated head output can be seamlessly pasted back onto the full original video.
+    """
+    import cv2
+    import numpy as np
+    from mosaicdiff.head_detector import HeadDetector, smooth_head_trajectory
+    from mosaicdiff.videoio import VideoWriter, open_capture
+
+    src_path = Path(video_input_path).resolve()
+    if not src_path.is_file():
+        raise FileNotFoundError(f"Input video file tidak ditemukan: {src_path}")
+
+    capture, width, height, fps, count = open_capture(src_path)
+    detector = HeadDetector()
+    detections: list[dict | None] = []
+    frames_read = 0
+
+    if log_cb:
+        log_cb(f"🔍 Mendeteksi area kepala/wajah pada video '{src_path.name}' ({width}x{height})...")
+
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            det = detector.detect_head(frame, need_mask=False)
+            detections.append(det)
+            frames_read += 1
+    finally:
+        capture.release()
+        detector.close()
+
+    if frames_read == 0:
+        raise ComfyAPIError(f"Video '{src_path.name}' kosong atau tidak dapat dibaca.")
+
+    valid_count = sum(1 for d in detections if d is not None)
+    if valid_count == 0:
+        raise ComfyAPIError(
+            f"Tidak terdeteksi area kepala/wajah pada video '{src_path.name}'! "
+            "Pastikan wajah/kepala target terlihat pada video."
+        )
+
+    # Smooth trajectory and fill short/edge gaps so the crop window is temporally stable
+    smoothed = smooth_head_trajectory(detections, max_gap=120, fill_edges=True)
+    head_boxes: list[tuple[int, int, int, int] | None] = [
+        d["head_box"] if d is not None else None for d in smoothed
+    ]
+    present_boxes = [b for b in head_boxes if b is not None]
+
+    # Expand each head box by ~22% context padding around hair/ears/neck so LTX-2.5 has clean context
+    # and the feathered mask fades smoothly to 0.0 inside the crop box
+    expanded_boxes: list[tuple[int, int, int, int]] = []
+    for hx1, hy1, hx2, hy2 in present_boxes:
+        hw = max(16, hx2 - hx1)
+        hh = max(16, hy2 - hy1)
+        pad_x = max(24, int(round(hw * 0.22)))
+        pad_y = max(24, int(round(hh * 0.22)))
+        ex1 = max(0, hx1 - pad_x)
+        ey1 = max(0, hy1 - pad_y)
+        ex2 = min(width, hx2 + pad_x)
+        ey2 = min(height, hy2 + pad_y)
+        expanded_boxes.append((ex1, ey1, ex2, ey2))
+
+    exp_widths = [b[2] - b[0] for b in expanded_boxes]
+    exp_heights = [b[3] - b[1] for b in expanded_boxes]
+    ref_w = int(np.percentile(exp_widths, 90))
+    ref_h = int(np.percentile(exp_heights, 90))
+
+    # Union box of all expanded head positions across the video
+    u_x1 = min(b[0] for b in expanded_boxes)
+    u_y1 = min(b[1] for b in expanded_boxes)
+    u_x2 = max(b[2] for b in expanded_boxes)
+    u_y2 = max(b[3] for b in expanded_boxes)
+    union_w = u_x2 - u_x1
+    union_h = u_y2 - u_y1
+
+    min_side = min(width, height, 256)
+
+    # Decide between a single static crop box (preferred when head movement is localized)
+    # vs a smoothly tracked constant-size crop box (when person walks/moves far across the frame)
+    if union_w <= ref_w * 1.35 and union_h <= ref_h * 1.35:
+        cx1, cy1, cx2, cy2 = u_x1, u_y1, u_x2, u_y2
+        # Ensure minimum crop size
+        if cx2 - cx1 < min_side:
+            cx_mid = (cx1 + cx2) // 2
+            cx1 = max(0, cx_mid - min_side // 2)
+            cx2 = min(width, cx1 + min_side)
+            cx1 = max(0, cx2 - min_side)
+        if cy2 - cy1 < min_side:
+            cy_mid = (cy1 + cy2) // 2
+            cy1 = max(0, cy_mid - min_side // 2)
+            cy2 = min(height, cy1 + min_side)
+            cy1 = max(0, cy2 - min_side)
+
+        # Snap to even coordinates
+        cx1 -= cx1 % 2
+        cy1 -= cy1 % 2
+        if (cx2 - cx1) % 2 != 0:
+            cx2 = cx2 + 1 if cx2 < width else cx2 - 1
+        if (cy2 - cy1) % 2 != 0:
+            cy2 = cy2 + 1 if cy2 < height else cy2 - 1
+
+        crop_w = max(2, cx2 - cx1)
+        crop_h = max(2, cy2 - cy1)
+        crop_boxes = [(cx1, cy1, cx2, cy2)] * frames_read
+        mode_desc = f"statis pada ({cx1},{cy1})-({cx2},{cy2})"
+    else:
+        # Smoothly tracked constant-size crop box following the head trajectory
+        crop_w = min(width - (width % 2), max(min_side, int(round(ref_w * 1.15 / 8.0) * 8)))
+        crop_h = min(height - (height % 2), max(min_side, int(round(ref_h * 1.15 / 8.0) * 8)))
+        crop_w -= crop_w % 2
+        crop_h -= crop_h % 2
+
+        raw_centers = []
+        last_c = (width / 2.0, height / 2.0)
+        for b in head_boxes:
+            if b is not None:
+                last_c = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
+            raw_centers.append(last_c)
+
+        # Heavy moving-average smoothing (window = 25 frames) for smooth camera tracking
+        win = 25
+        crop_boxes = []
+        for i in range(frames_read):
+            sub = raw_centers[max(0, i - win // 2) : min(frames_read, i + win // 2 + 1)]
+            scx = float(np.mean([c[0] for c in sub]))
+            scy = float(np.mean([c[1] for c in sub]))
+            cx1 = int(round(scx - crop_w / 2.0))
+            cy1 = int(round(scy - crop_h / 2.0))
+            cx1 = max(0, min(width - crop_w, cx1))
+            cy1 = max(0, min(height - crop_h, cy1))
+            cx1 -= cx1 % 2
+            cy1 -= cy1 % 2
+            crop_boxes.append((cx1, cy1, cx1 + crop_w, cy1 + crop_h))
+        mode_desc = "tracking halus mengikuti pergerakan kepala"
+
+    # Pad frame count to LTX-2.5 requirement: (padded_N - 1) % 8 == 0
+    padded_frames = align_up(frames_read)
+    eff_fps = max(1, int(round(fps)))
+
+    c_in = Path(comfy_root).resolve() / "input"
+    c_in.mkdir(parents=True, exist_ok=True)
+    crop_filename = f"head_crop_{src_path.stem}.mp4"
+    crop_video_path = c_in / crop_filename
+
+    writer = VideoWriter(crop_video_path, crop_w, crop_h, Fraction(eff_fps, 1))
+    capture2, _, _, _, _ = open_capture(src_path)
+    last_crop_frame = None
+    idx = 0
+    try:
+        while True:
+            ok, frame = capture2.read()
+            if not ok or idx >= frames_read:
+                break
+            cx1, cy1, cx2, cy2 = crop_boxes[idx]
+            patch = frame[cy1:cy2, cx1:cx2]
+            if patch.shape[1] != crop_w or patch.shape[0] != crop_h:
+                patch = cv2.resize(patch, (crop_w, crop_h), interpolation=cv2.INTER_AREA)
+            writer.write(patch)
+            last_crop_frame = patch
+            idx += 1
+        # Pad remaining frames (if any) so LTX-2.5 VAE processes all frames without truncation
+        if last_crop_frame is not None and padded_frames > idx:
+            for _ in range(padded_frames - idx):
+                writer.write(last_crop_frame)
+    finally:
+        capture2.release()
+        writer.close()
+
+    area_pct = (crop_w * crop_h) / max(1, width * height) * 100.0
+    if log_cb:
+        log_cb(
+            f"✂️ Area kepala berhasil di-crop: {crop_w}x{crop_h} px ({area_pct:.1f}% dari frame utuh {width}x{height} px, {mode_desc})"
+        )
+
+    return {
+        "orig_video_path": str(src_path),
+        "crop_video_path": str(crop_video_path),
+        "crop_filename": crop_filename,
+        "orig_width": width,
+        "orig_height": height,
+        "orig_fps": fps,
+        "effective_fps": eff_fps,
+        "orig_frame_count": frames_read,
+        "padded_frame_count": padded_frames,
+        "crop_w": crop_w,
+        "crop_h": crop_h,
+        "crop_boxes": crop_boxes,
+        "head_boxes": head_boxes,
+    }
+
+
+def composite_crop_to_full_video(
+    crop_info: dict,
+    generated_crop_video: str | Path,
+    dest_file: str | Path,
+    log_cb=print,
+) -> Path:
+    """Paste the generated head/face crop back onto the full original video with feathered blending."""
+    import cv2
+    import numpy as np
+    from mosaicdiff.head_detector import create_crop_head_mask
+    from mosaicdiff.videoio import VideoWriter, copy_audio, open_capture
+
+    orig_path = Path(crop_info["orig_video_path"]).resolve()
+    gen_path = Path(generated_crop_video).resolve()
+    dst_path = Path(dest_file).resolve()
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+
+    orig_w = int(crop_info["orig_width"])
+    orig_h = int(crop_info["orig_height"])
+    orig_fps = float(crop_info["orig_fps"])
+    frame_count = int(crop_info["orig_frame_count"])
+    crop_boxes: list[tuple[int, int, int, int]] = crop_info["crop_boxes"]
+    head_boxes: list[tuple[int, int, int, int] | None] = crop_info["head_boxes"]
+
+    if log_cb:
+        log_cb(
+            f"🎬 Menempelkan (compositing) hasil generate area kepala kembali ke video utuh ({orig_w}x{orig_h})..."
+        )
+
+    cap_orig, _, _, _, _ = open_capture(orig_path)
+    cap_gen, _, _, _, _ = open_capture(gen_path)
+
+    silent_tmp = dst_path.with_name(f"{dst_path.stem}.silent_tmp{dst_path.suffix}")
+    writer = VideoWriter(silent_tmp, orig_w, orig_h, Fraction(orig_fps).limit_denominator(1000))
+
+    last_gen_frame: np.ndarray | None = None
+    idx = 0
+    try:
+        while idx < frame_count:
+            ok_orig, orig_frame = cap_orig.read()
+            if not ok_orig:
+                break
+            ok_gen, gen_frame = cap_gen.read()
+            if ok_gen and gen_frame is not None:
+                last_gen_frame = gen_frame
+            elif last_gen_frame is not None:
+                gen_frame = last_gen_frame
+            else:
+                gen_frame = None
+
+            hbox = head_boxes[idx] if idx < len(head_boxes) else None
+            cbox = crop_boxes[idx] if idx < len(crop_boxes) else None
+
+            if gen_frame is not None and hbox is not None and cbox is not None:
+                cx1, cy1, cx2, cy2 = cbox
+                cx1 = max(0, cx1)
+                cy1 = max(0, cy1)
+                cx2 = min(orig_frame.shape[1], cx2)
+                cy2 = min(orig_frame.shape[0], cy2)
+                cw = cx2 - cx1
+                ch = cy2 - cy1
+
+                if cw > 4 and ch > 4:
+                    patch = gen_frame
+                    if patch.shape[1] != cw or patch.shape[0] != ch:
+                        patch = cv2.resize(patch, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
+
+                    alpha = create_crop_head_mask((cx1, cy1, cx2, cy2), hbox)
+                    orig_region = orig_frame[cy1:cy2, cx1:cx2].astype(np.float32)
+                    patch_f32 = patch.astype(np.float32)
+
+                    # Gentle border-ring luminance/color harmonization so there is zero visible seam
+                    ring_mask = (alpha[:, :, 0] > 0.05) & (alpha[:, :, 0] < 0.45)
+                    if np.count_nonzero(ring_mask) > 32:
+                        diff = np.mean(orig_region[ring_mask] - patch_f32[ring_mask], axis=0)
+                        diff = np.clip(diff, -14.0, 14.0)
+                        patch_f32 = np.clip(patch_f32 + diff, 0.0, 255.0)
+
+                    blended = orig_region * (1.0 - alpha) + patch_f32 * alpha
+                    orig_frame = orig_frame.copy()
+                    orig_frame[cy1:cy2, cx1:cx2] = np.clip(np.round(blended), 0, 255).astype(np.uint8)
+
+            writer.write(orig_frame)
+            idx += 1
+    finally:
+        cap_orig.release()
+        cap_gen.release()
+        writer.close()
+
+    # Copy original audio stream from source video
+    audio_tmp = dst_path.with_name(f"{dst_path.stem}.audio_tmp{dst_path.suffix}")
+    try:
+        if copy_audio(silent_tmp, orig_path, audio_tmp):
+            audio_tmp.replace(dst_path)
+            silent_tmp.unlink(missing_ok=True)
+        else:
+            silent_tmp.replace(dst_path)
+    except Exception as exc:
+        audio_tmp.unlink(missing_ok=True)
+        silent_tmp.replace(dst_path)
+        if log_cb:
+            log_cb(f"Notice: Audio asli tidak dapat disalin ({exc}), menyimpan video tanpa audio.")
+
+    if log_cb:
+        log_cb(f"✅ Berhasil menempelkan area kepala ke video utuh: {dst_path.name}")
+
+    return dst_path
+
+
 def prepare_comfy_inputs(
     comfy_root: str | Path,
     video_input_path: str | Path,
@@ -283,10 +601,10 @@ def prepare_comfy_inputs(
     v_dst = c_in / v_src.name
     h_dst = c_in / h_src.name
 
-    if not v_dst.is_file() or v_src.stat().st_mtime > v_dst.stat().st_mtime:
+    if v_src != v_dst and (not v_dst.is_file() or v_src.stat().st_mtime > v_dst.stat().st_mtime):
         shutil.copy2(v_src, v_dst)
 
-    if not h_dst.is_file() or h_src.stat().st_mtime > h_dst.stat().st_mtime:
+    if h_src != h_dst and (not h_dst.is_file() or h_src.stat().st_mtime > h_dst.stat().st_mtime):
         shutil.copy2(h_src, h_dst)
 
     return v_src.name, h_src.name
@@ -350,8 +668,8 @@ def build_ltx_sigmas(steps: int) -> str:
     """Generate dynamic LTX-2.5 sigmas schedule for the requested step count."""
     if steps == 8:
         return "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
-    base = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0]
     import numpy as np
+    base = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0]
     x_base = np.linspace(0, 1, len(base))
     x_target = np.linspace(0, 1, max(2, int(steps)) + 1)
     sigmas = np.interp(x_target, x_base, base)
@@ -360,7 +678,7 @@ def build_ltx_sigmas(steps: int) -> str:
     return ", ".join(f"{s:.6f}".rstrip("0").rstrip(".") for s in sigmas)
 
 
-def normalize_aspect_ratio(val: str, default: str = "16:9 (Widescreen)") -> str:
+def normalize_aspect_ratio(val: str, default: str = "1:1 (Square)") -> str:
     """Map any user aspect ratio label to ComfyUI ResolutionSelector COMBO choices."""
     v = (val or "").lower().strip()
     if "9:16" in v:
@@ -404,10 +722,10 @@ def detect_video_aspect_ratio(video_path: str | Path) -> str:
                 elif 1.15 <= ratio < 1.55:
                     return "4:3 (Standard)"
                 else:
-                    return "16:9 (Widescreen)"
+                    return "1:1 (Square)"
     except Exception:
         pass
-    return "16:9 (Widescreen)"
+    return "1:1 (Square)"
 
 
 def patch_bfs_prompt(
@@ -423,11 +741,36 @@ def patch_bfs_prompt(
     resolution_mp: float = 1.0,
     aspect_ratio: str = "auto",
     comfy_root: str | Path = "/content/ComfyUI",
+    crop_head_only: bool = True,
+    log_cb=print,
 ) -> dict:
-    """Patch the API prompt graph nodes with user-provided parameters."""
+    """Patch the API prompt graph nodes with user-provided parameters.
+
+    When crop_head_only=True (default), detects the head/face in video_input_path,
+    writes a cropped guide video around the head area, and configures the workflow
+    to generate ONLY the head region. run_comfy_workflow() then automatically pastes
+    the generated head region back onto the full original video.
+    """
     patched = json.loads(json.dumps(prompt_dict))  # deep copy
 
-    v_filename, h_filename = prepare_comfy_inputs(comfy_root, video_input_path, head_image_path)
+    crop_info = None
+    guide_video_for_comfy = Path(video_input_path).resolve()
+    if crop_head_only:
+        crop_info = prepare_head_crop_video(
+            video_input_path=video_input_path,
+            comfy_root=comfy_root,
+            log_cb=log_cb,
+        )
+        guide_video_for_comfy = Path(crop_info["crop_video_path"]).resolve()
+
+    v_filename, h_filename = prepare_comfy_inputs(comfy_root, guide_video_for_comfy, head_image_path)
+
+    if crop_info is not None:
+        _ACTIVE_CROP_CONTEXT[v_filename] = crop_info
+        _ACTIVE_CROP_CONTEXT["__latest__"] = crop_info
+    else:
+        _ACTIVE_CROP_CONTEXT.pop(v_filename, None)
+        _ACTIVE_CROP_CONTEXT.pop("__latest__", None)
 
     # Format BFS Head Swap prompt
     p_text = prompt_text.strip()
@@ -469,7 +812,6 @@ def patch_bfs_prompt(
         if ctype in ("LoraLoaderModelOnly", "LoraLoader") and "head_swap" in str(inputs.get("lora_name", "")).lower():
             if "strength_model" in inputs:
                 inputs["strength_model"] = float(lora_strength)
-            # Use official canonical file or matching file on disk
             cur_lora = inputs.get("lora_name", "")
             if cur_lora not in available_loras:
                 for cand in available_loras:
@@ -500,30 +842,43 @@ def patch_bfs_prompt(
         if ctype == "ResolutionSelector" or nid == "403":
             inputs["megapixels"] = float(resolution_mp)
             inputs["multiple"] = 32
-            if aspect_ratio == "auto" or not aspect_ratio:
-                inputs["aspect_ratio"] = detect_video_aspect_ratio(video_input_path)
+            # Always match the aspect ratio of the cropped head video when crop_head_only is active
+            if crop_info is not None or aspect_ratio == "auto" or not aspect_ratio:
+                inputs["aspect_ratio"] = detect_video_aspect_ratio(guide_video_for_comfy)
             else:
                 inputs["aspect_ratio"] = normalize_aspect_ratio(aspect_ratio)
 
-        # 8. UNETLoader (Node 443) required weight_dtype
+        # 8. Frame Rate & Video Length synchronization with cropped video
+        if crop_info is not None:
+            if nid == "430" or (ctype == "PrimitiveInt" and "Frame Rate" in title):
+                inputs["value"] = int(crop_info["effective_fps"])
+            if nid == "425" or (ctype == "PrimitiveInt" and "Duration" in title):
+                inputs["value"] = max(1, int(math.ceil(crop_info["padded_frame_count"] / crop_info["effective_fps"])))
+            if nid == "627" or ctype == "EmptyAudio":
+                inputs["duration"] = float(max(1.0, crop_info["padded_frame_count"] / crop_info["effective_fps"]))
+
+        # 9. UNETLoader (Node 443) required weight_dtype
         if ctype == "UNETLoader" or nid == "443":
             inputs["weight_dtype"] = "default"
 
-        # 9. CLIPLoader (Node 446) required type
+        # 10. CLIPLoader (Node 446) required type
         if ctype == "CLIPLoader" or nid == "446":
             inputs.setdefault("type", "ltxv")
 
-        # 10. Second Pass & Comparison Video Handling
+        # 11. Second Pass & Comparison Video Handling
         if not enable_second_pass:
             if ctype == "SaveVideo" and ("Second Pass" in title or nid == "75"):
                 nodes_to_remove.append(nid)
             elif ctype == "VHS_VideoCombine" and ("comparison" in str(inputs).lower() or nid == "491"):
                 nodes_to_remove.append(nid)
 
-        # 11. Math Expression for video length (Node 455: a * b + 1)
+        # 12. Math Expression for video length (Node 455: a * b + 1)
         if nid == "455" or (ctype == "ComfyMathExpression" and "b" in str(inputs.get("expression", ""))):
             if "values.b" not in inputs and "b" not in inputs:
                 inputs["values.b"] = ["430", 0]
+            if crop_info is not None:
+                padded_n = int(crop_info["padded_frame_count"])
+                inputs["expression"] = f"{padded_n} + 0 * a * b"
 
     # Prune second pass save nodes if disabled so ComfyUI only generates first pass
     for nid in nodes_to_remove:
@@ -542,11 +897,12 @@ def run_comfy_workflow(
     progress_cb=None,
     cancel_event=None,
 ) -> Path:
-    """Submit prompt to ComfyUI API, stream progress, and wait for generated output video."""
+    """Submit prompt to ComfyUI API, stream progress, and composite generated head crop back onto the full video."""
     # 0. Self-Healing Model Check: Pastikan seluruh file bobot BFS tersedia di ComfyUI/models/
     has_second_pass = any(
         n.get("class_type") == "SaveVideo" and "Second Pass" in n.get("_meta", {}).get("title", "")
         for n in prompt_dict.values()
+        if isinstance(n, dict)
     )
     needed_restart = ensure_bfs_models(
         comfy_root=comfy_root,
@@ -562,6 +918,17 @@ def run_comfy_workflow(
             start_comfy_daemon(comfy_root=comfy_root, host=host, port=port, log_cb=log_cb)
     else:
         start_comfy_daemon(comfy_root=comfy_root, host=host, port=port, log_cb=log_cb)
+
+    # Identify active head-crop metadata if this workflow was patched with crop_head_only=True
+    crop_info = None
+    for node in prompt_dict.values():
+        if isinstance(node, dict) and node.get("class_type") == "VHS_LoadVideo":
+            v_name = node.get("inputs", {}).get("video", "")
+            if v_name in _ACTIVE_CROP_CONTEXT:
+                crop_info = _ACTIVE_CROP_CONTEXT[v_name]
+                break
+    if crop_info is None:
+        crop_info = _ACTIVE_CROP_CONTEXT.get("__latest__")
 
     client_id = str(uuid.uuid4())
     url = f"http://{host}:{port}/prompt"
@@ -590,7 +957,7 @@ def run_comfy_workflow(
     if not prompt_id:
         raise ComfyAPIError(f"Gagal mengirim workflow ke ComfyUI: {res}")
 
-    log_cb(f"Workflow berhasil dimasukkan ke antrean ComfyUI (Prompt ID: {prompt_id})")
+    log_cb(f"Workflow area kepala berhasil dimasukkan ke antrean ComfyUI (Prompt ID: {prompt_id})")
 
     # Connect to WebSocket for real-time progress & node execution
     ws = None
@@ -646,9 +1013,9 @@ def run_comfy_workflow(
                             total = mdata.get("max", 1)
                             frac = min(1.0, val / max(1, total))
                             if progress_cb:
-                                progress_cb(frac, f"Sampling: {val}/{total}")
+                                progress_cb(frac, f"Sampling Head Area: {val}/{total}")
                             elif val % 2 == 0 or val == total:
-                                log_cb(f"⏳ Sampling: {val}/{total} steps ({frac * 100:.0f}%)")
+                                log_cb(f"⏳ Sampling Head Area: {val}/{total} steps ({frac * 100:.0f}%)")
 
                         elif mtype == "execution_error":
                             err_node = mdata.get("node_id")
@@ -678,7 +1045,7 @@ def run_comfy_workflow(
             except Exception:
                 pass
 
-    log_cb("Eksekusi workflow selesai! Mengambil file video hasil...")
+    log_cb("Eksekusi generate area kepala selesai! Mengambil file hasil...")
     # Get history to find written video files
     h_url = f"http://{host}:{port}/history/{prompt_id}"
     with urllib.request.urlopen(h_url) as resp:
@@ -697,7 +1064,6 @@ def run_comfy_workflow(
                 found_videos.append((subf, fname))
 
     if not found_videos:
-        # Fallback search in ComfyUI/output
         comfy_out = c_root / "output"
         if comfy_out.is_dir():
             mp4s = sorted(comfy_out.glob("**/*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -707,7 +1073,7 @@ def run_comfy_workflow(
     if not found_videos:
         raise ComfyAPIError("Tidak ditemukan file video hasil dari eksekusi ComfyUI.")
 
-    # Select best video: second_pass > first_pass > comparison > first item
+    # Select best video: second_pass > first_pass > head_swap > comparison > first item
     selected = None
     for pref in ["second_pass", "first_pass", "head_swap", "comparison"]:
         for subf, fname in found_videos:
@@ -722,18 +1088,15 @@ def run_comfy_workflow(
 
     subfolder, filename = selected
 
-    # Resilient path resolution: direct path, recursive match, or latest video in output
     resolved_file = None
     direct_path = c_root / "output" / subfolder / filename
     if direct_path.is_file():
         resolved_file = direct_path
     else:
-        # Search anywhere under c_root / "output" for matching filename
         matches = [p for p in (c_root / "output").glob(f"**/{filename}") if p.is_file() and p.stat().st_size > 0]
         if matches:
             resolved_file = matches[0]
         else:
-            # Fallback to the newest video in c_root / "output"
             recent_vids = sorted(
                 [
                     p for p in (c_root / "output").glob("**/*")
@@ -749,14 +1112,23 @@ def run_comfy_workflow(
         raise FileNotFoundError(f"File video hasil '{filename}' tidak ditemukan di {c_root / 'output'}")
 
     out_video_path = resolved_file
+    log_cb(f"Video crop kepala terpilih: {out_video_path.name} ({out_video_path.stat().st_size / (1024*1024):.2f} MB)")
 
-    log_cb(f"Video hasil terpilih: {out_video_path.name} ({out_video_path.stat().st_size / (1024*1024):.2f} MB)")
-    log_cb(f"  📍 Lokasi file: {out_video_path}")
+    target_dst = Path(dest_file).resolve() if dest_file else out_video_path.with_name(f"{out_video_path.stem}_full.mp4")
+
+    # Composite the generated head crop back onto the full original video
+    if crop_info is not None:
+        final_video = composite_crop_to_full_video(
+            crop_info=crop_info,
+            generated_crop_video=out_video_path,
+            dest_file=target_dst,
+            log_cb=log_cb,
+        )
+        return final_video
 
     if dest_file:
-        dst = Path(dest_file).resolve()
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(out_video_path, dst)
-        return dst
+        target_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(out_video_path, target_dst)
+        return target_dst
 
     return out_video_path
