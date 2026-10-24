@@ -322,8 +322,8 @@ def prepare_head_crop_video(
     capture, width, height, _fps, count = open_capture(src_path)
     detector = HeadDetector()
 
-    # 2. Analyze source head photo hair extent (if provided)
-    src_ratios = (0.65, 0.45, 0.85)
+    # 2. Analyze source head photo hair extent (4 sides: left, top, right, bottom)
+    src_ratios = (0.0, 0.08, 0.0, 0.0)
     if head_image_path is not None and Path(head_image_path).is_file():
         src_img = cv2.imread(str(head_image_path))
         if src_img is not None:
@@ -370,36 +370,41 @@ def prepare_head_crop_video(
     # 3. Lock onto ONLY 1 primary actor across the entire video
     locked_actor = lock_single_actor_trajectory(all_frame_candidates, width, height)
 
-    # 4. Estimate target actor's hair extent (down to shoulders/chest/stomach) on sampled keyframes
-    target_top_list = [0.65]
-    target_bot_list = [0.45]
-    target_side_list = [0.85]
+    # 4. Estimate tight 4-side hair extent (left, top, right, bottom) on sampled keyframes
+    target_left_list = [0.0]
+    target_top_list = [0.08]
+    target_right_list = [0.0]
+    target_bot_list = [0.0]
     for f_idx, f_img in sampled_frames.items():
         if f_idx < len(locked_actor) and locked_actor[f_idx] is not None:
-            tr, br, sr = detector.estimate_hair_expansion_ratios(f_img, locked_actor[f_idx]["face_box"])
+            lr, tr, rr, br = detector.estimate_hair_expansion_ratios(f_img, locked_actor[f_idx]["face_box"])
+            target_left_list.append(lr)
             target_top_list.append(tr)
+            target_right_list.append(rr)
             target_bot_list.append(br)
-            target_side_list.append(sr)
 
     detector.close()
 
-    t_top = float(np.percentile(target_top_list, 90))
-    t_bot = float(np.percentile(target_bot_list, 90))
-    t_side = float(np.percentile(target_side_list, 90))
+    t_left = float(np.percentile(target_left_list, 75))
+    t_top = float(np.percentile(target_top_list, 75))
+    t_right = float(np.percentile(target_right_list, 75))
+    t_bot = float(np.percentile(target_bot_list, 75))
 
-    # Combine Target hair extent and Source photo hair extent so the rectangle covers BOTH
+    # Tight union of Target hair extent and Source photo hair extent (4 independent sides)
     final_ratios = (
-        max(t_top, src_ratios[0]),
-        max(t_bot, src_ratios[1]),
-        max(t_side, src_ratios[2]),
+        max(t_left, src_ratios[0]),
+        max(t_top, src_ratios[1]),
+        max(t_right, src_ratios[2]),
+        max(t_bot, src_ratios[3]),
     )
     if log_cb:
         log_cb(
-            f"📐 Cakupan Kepala + Rambut Dinamis: Atas={final_ratios[0]:.2f}x, "
-            f"Bawah={final_ratios[1]:.2f}x (hingga ujung rambut), Samping={final_ratios[2]:.2f}x"
+            f"📐 Ekspansi Ketat Wajah+Rambut (Toleransi 6px): "
+            f"Kiri=+{final_ratios[0]*100:.0f}%, Atas=+{final_ratios[1]*100:.0f}%, "
+            f"Kanan=+{final_ratios[2]*100:.0f}%, Bawah=+{final_ratios[3]*100:.0f}%"
         )
 
-    # Apply the unified hair+head expansion ratios to the locked actor in every frame
+    # Apply the tight 4-side expansion ratios (+6px tolerance) to the locked actor in every frame
     for idx, det in enumerate(locked_actor):
         if det is not None:
             fx1, fy1, fx2, fy2 = det["face_box"]
@@ -414,86 +419,36 @@ def prepare_head_crop_video(
     ]
     present_boxes = [b for b in head_boxes if b is not None]
 
-    # Add a 12% margin around the head+hair rectangle for seamless edge feathering
-    expanded_boxes: list[tuple[int, int, int, int]] = []
-    for hx1, hy1, hx2, hy2 in present_boxes:
-        hw = max(16, hx2 - hx1)
-        hh = max(16, hy2 - hy1)
-        pad_x = max(16, int(round(hw * 0.12)))
-        pad_y = max(16, int(round(hh * 0.12)))
-        ex1 = max(0, hx1 - pad_x)
-        ey1 = max(0, hy1 - pad_y)
-        ex2 = min(width, hx2 + pad_x)
-        ey2 = min(height, hy2 + pad_y)
-        expanded_boxes.append((ex1, ey1, ex2, ey2))
+    # Exact tight dimensions (no extra percentage padding, no min_side=256 inflation)
+    box_widths = [b[2] - b[0] for b in present_boxes]
+    box_heights = [b[3] - b[1] for b in present_boxes]
+    crop_w = min(width - (width % 2), max(32, int(round(np.percentile(box_widths, 80)))))
+    crop_h = min(height - (height % 2), max(32, int(round(np.percentile(box_heights, 80)))))
+    crop_w -= crop_w % 2
+    crop_h -= crop_h % 2
 
-    exp_widths = [b[2] - b[0] for b in expanded_boxes]
-    exp_heights = [b[3] - b[1] for b in expanded_boxes]
-    ref_w = int(np.percentile(exp_widths, 95))
-    ref_h = int(np.percentile(exp_heights, 95))
+    raw_centers = []
+    last_c = (width / 2.0, height / 2.0)
+    for b in head_boxes:
+        if b is not None:
+            last_c = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
+        raw_centers.append(last_c)
 
-    u_x1 = min(b[0] for b in expanded_boxes)
-    u_y1 = min(b[1] for b in expanded_boxes)
-    u_x2 = max(b[2] for b in expanded_boxes)
-    u_y2 = max(b[3] for b in expanded_boxes)
-    union_w = u_x2 - u_x1
-    union_h = u_y2 - u_y1
-
-    min_side = min(width, height, 256)
-
-    # Use a static rectangle when movement is small, or zero-lag 3-frame centered tracking when moving
-    if union_w <= ref_w * 1.18 and union_h <= ref_h * 1.18:
-        cx1, cy1, cx2, cy2 = u_x1, u_y1, u_x2, u_y2
-        if cx2 - cx1 < min_side:
-            cx_mid = (cx1 + cx2) // 2
-            cx1 = max(0, cx_mid - min_side // 2)
-            cx2 = min(width, cx1 + min_side)
-            cx1 = max(0, cx2 - min_side)
-        if cy2 - cy1 < min_side:
-            cy_mid = (cy1 + cy2) // 2
-            cy1 = max(0, cy_mid - min_side // 2)
-            cy2 = min(height, cy1 + min_side)
-            cy1 = max(0, cy2 - min_side)
-
+    # Position the tight (crop_w, crop_h) rectangle directly on the actor's head+hair center per frame
+    win = 3
+    crop_boxes = []
+    for i in range(frames_read):
+        sub = raw_centers[max(0, i - win // 2) : min(frames_read, i + win // 2 + 1)]
+        scx = float(np.mean([c[0] for c in sub]))
+        scy = float(np.mean([c[1] for c in sub]))
+        cx1 = int(round(scx - crop_w / 2.0))
+        cy1 = int(round(scy - crop_h / 2.0))
+        cx1 = max(0, min(width - crop_w, cx1))
+        cy1 = max(0, min(height - crop_h, cy1))
         cx1 -= cx1 % 2
         cy1 -= cy1 % 2
-        if (cx2 - cx1) % 2 != 0:
-            cx2 = cx2 + 1 if cx2 < width else cx2 - 1
-        if (cy2 - cy1) % 2 != 0:
-            cy2 = cy2 + 1 if cy2 < height else cy2 - 1
-
-        crop_w = max(2, cx2 - cx1)
-        crop_h = max(2, cy2 - cy1)
-        crop_boxes = [(cx1, cy1, cx2, cy2)] * frames_read
-        mode_desc = f"rectangle statis ({cx1},{cy1})-({cx2},{cy2})"
-    else:
-        crop_w = min(width - (width % 2), max(min_side, int(round(ref_w * 1.06 / 8.0) * 8)))
-        crop_h = min(height - (height % 2), max(min_side, int(round(ref_h * 1.06 / 8.0) * 8)))
-        crop_w -= crop_w % 2
-        crop_h -= crop_h % 2
-
-        raw_centers = []
-        last_c = (width / 2.0, height / 2.0)
-        for b in head_boxes:
-            if b is not None:
-                last_c = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
-            raw_centers.append(last_c)
-
-        # Tight 3-frame centered smoothing -> zero positional lag!
-        win = 3
-        crop_boxes = []
-        for i in range(frames_read):
-            sub = raw_centers[max(0, i - win // 2) : min(frames_read, i + win // 2 + 1)]
-            scx = float(np.mean([c[0] for c in sub]))
-            scy = float(np.mean([c[1] for c in sub]))
-            cx1 = int(round(scx - crop_w / 2.0))
-            cy1 = int(round(scy - crop_h / 2.0))
-            cx1 = max(0, min(width - crop_w, cx1))
-            cy1 = max(0, min(height - crop_h, cy1))
-            cx1 -= cx1 % 2
-            cy1 -= cy1 % 2
-            crop_boxes.append((cx1, cy1, cx1 + crop_w, cy1 + crop_h))
-        mode_desc = "rectangle dinamis (zero-lag tracking 1 aktor)"
+        crop_boxes.append((cx1, cy1, cx1 + crop_w, cy1 + crop_h))
+    mode_desc = "tight rectangle tepat di batas wajah+rambut (toleransi 6px)"
 
     # Pad frame count to LTX-2.5 requirement: (padded_N - 1) % 8 == 0
     padded_frames = align_up(frames_read)

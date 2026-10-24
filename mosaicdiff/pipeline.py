@@ -127,15 +127,20 @@ def process_video(
         if not present:
             raise RuntimeError(f"Tidak ditemukan wajah/kepala pada video {source.name}")
 
-        grown = []
-        for box in head_boxes:
-            if box is None:
-                grown.append(None)
-            else:
-                grown.append(expand_box(*box, height, width))
-
-        crop = stable_crop([box for box in grown if box is not None], width, height)
-        log(f"LTX-2.5 Head+Hair Rectangle {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]} (24 FPS)")
+        # Keep head_boxes tight (no extra expand_box inflation)
+        grown = list(head_boxes)
+        x1 = max(0, min(b[0] for b in present))
+        y1 = max(0, min(b[1] for b in present))
+        x2 = min(width, max(b[2] for b in present))
+        y2 = min(height, max(b[3] for b in present))
+        x1 -= x1 % 2
+        y1 -= y1 % 2
+        if (x2 - x1) % 2 != 0:
+            x2 = x2 + 1 if x2 < width else x2 - 1
+        if (y2 - y1) % 2 != 0:
+            y2 = y2 + 1 if y2 < height else y2 - 1
+        crop = (x1, y1, x2, y2)
+        log(f"LTX-2.5 Tight Head+Hair Rectangle {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]} (24 FPS)")
 
         _h3(source_24, comp_path, destination, settings, crop, head_boxes, grown, float(TARGET_FPS), log, progress, cancel)
     finally:
@@ -170,7 +175,7 @@ def _detect_and_composite(
     sample_stride = max(1, (count or 120) // 16)
     seen = 0
 
-    src_ratios = (0.65, 0.45, 0.85)
+    src_ratios = (0.0, 0.08, 0.0, 0.0)
     src_img = cv2.imread(str(head_path))
     if src_img is not None:
         src_cands = detector.detect_all_faces(src_img)
@@ -203,20 +208,23 @@ def _detect_and_composite(
 
     locked = lock_single_actor_trajectory(all_candidates, width, height)
 
-    target_top = [0.65]
-    target_bot = [0.45]
-    target_side = [0.85]
+    target_left = [0.0]
+    target_top = [0.08]
+    target_right = [0.0]
+    target_bot = [0.0]
     for f_idx, f_img in sampled_frames.items():
         if f_idx < len(locked) and locked[f_idx] is not None:
-            tr, br, sr = detector.estimate_hair_expansion_ratios(f_img, locked[f_idx]["face_box"])
+            lr, tr, rr, br = detector.estimate_hair_expansion_ratios(f_img, locked[f_idx]["face_box"])
+            target_left.append(lr)
             target_top.append(tr)
+            target_right.append(rr)
             target_bot.append(br)
-            target_side.append(sr)
 
     final_ratios = (
-        max(float(np.percentile(target_top, 90)), src_ratios[0]),
-        max(float(np.percentile(target_bot, 90)), src_ratios[1]),
-        max(float(np.percentile(target_side, 90)), src_ratios[2]),
+        max(float(np.percentile(target_left, 75)), src_ratios[0]),
+        max(float(np.percentile(target_top, 75)), src_ratios[1]),
+        max(float(np.percentile(target_right, 75)), src_ratios[2]),
+        max(float(np.percentile(target_bot, 75)), src_ratios[3]),
     )
     for det in locked:
         if det is not None:
