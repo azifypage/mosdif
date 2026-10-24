@@ -293,16 +293,19 @@ def prepare_head_crop_video(
     video_input_path: str | Path,
     head_image_path: str | Path | None = None,
     comfy_root: str | Path = "/content/ComfyUI",
+    resolution_mp: float = 1.0,
+    show_paste_box: bool = False,
     log_cb=print,
 ) -> dict:
     """Normalize input video to 24 FPS CFR, lock onto 1 primary actor, dynamically size the
     head+hair rectangle (covering both target hair down to chest/stomach and source hair),
-    and export a 24 FPS cropped guide video.
+    lock aspect ratio to the LTX-2.5 latent grid, and export a 24 FPS cropped guide video.
     """
     import cv2
     import numpy as np
     from mosaicdiff.head_detector import (
         HeadDetector,
+        draw_paste_box_outline,
         lock_single_actor_trajectory,
         smooth_head_trajectory,
     )
@@ -455,9 +458,47 @@ def prepare_head_crop_video(
 
     crop_w = max(64, cx2 - cx1)
     crop_h = max(64, cy2 - cy1)
+
+    # Lock (crop_w, crop_h) aspect ratio to match (gen_w, gen_h) so ComfyUI ImageResizeKJv2
+    # performs 100% uniform isotropic scaling with zero horizontal/vertical stretch distortion
+    gen_w, gen_h = compute_dynamic_generation_dims(crop_w, crop_h, resolution_mp=resolution_mp)
+    target_ar = float(gen_w) / float(max(1, gen_h))
+    cur_ar = float(crop_w) / float(max(1, crop_h))
+    box_cx = (cx1 + cx2) / 2.0
+    box_cy = (cy1 + cy2) / 2.0
+
+    if abs(cur_ar - target_ar) > 0.005:
+        if cur_ar < target_ar:
+            # Expand width around center to match target_ar
+            ideal_w = min(width, int(round(crop_h * target_ar)))
+            ideal_w -= ideal_w % 2
+            if ideal_w > crop_w:
+                nx1 = max(0, min(width - ideal_w, int(round(box_cx - ideal_w / 2.0))))
+                nx1 -= nx1 % 2
+                cx1, cx2 = nx1, nx1 + ideal_w
+                crop_w = ideal_w
+        else:
+            # Expand height around center to match target_ar
+            ideal_h = min(height, int(round(crop_w / target_ar)))
+            ideal_h -= ideal_h % 2
+            if ideal_h > crop_h:
+                ny1 = max(0, min(height - ideal_h, int(round(box_cy - ideal_h / 2.0))))
+                ny1 -= ny1 % 2
+                cy1, cy2 = ny1, ny1 + ideal_h
+                crop_h = ideal_h
+
     static_crop_box = (cx1, cy1, cx1 + crop_w, cy1 + crop_h)
     crop_boxes = [static_crop_box] * frames_read
     mode_desc = f"static locked rectangle ({cx1},{cy1})-({cx1 + crop_w},{cy1 + crop_h}) mencakup kepala + rambut dada/perut"
+
+    # Save a preview image showing the "Kotak Tempel" outline on a representative frame
+    preview_box_path = c_in / f"paste_box_preview_{raw_src_path.stem}.jpg"
+    if sampled_frames:
+        mid_key = sorted(sampled_frames.keys())[len(sampled_frames) // 2]
+        prev_frame = sampled_frames[mid_key]
+        prev_hbox = head_boxes[mid_key] if mid_key < len(head_boxes) else None
+        outlined_prev = draw_paste_box_outline(prev_frame, static_crop_box, prev_hbox)
+        cv2.imwrite(str(preview_box_path), outlined_prev)
 
     # Pad frame count to LTX-2.5 requirement: (padded_N - 1) % 8 == 0
     padded_frames = align_up(frames_read)
@@ -498,6 +539,8 @@ def prepare_head_crop_video(
         "orig_video_path": str(src_path),
         "crop_video_path": str(crop_video_path),
         "crop_filename": crop_filename,
+        "preview_box_path": str(preview_box_path) if preview_box_path.is_file() else "",
+        "show_paste_box": bool(show_paste_box),
         "orig_width": width,
         "orig_height": height,
         "orig_fps": float(TARGET_FPS),
@@ -515,12 +558,15 @@ def composite_crop_to_full_video(
     crop_info: dict,
     generated_crop_video: str | Path,
     dest_file: str | Path,
+    show_paste_box: bool | None = None,
     log_cb=print,
 ) -> Path:
-    """Paste the generated rectangular head+hair patch back onto the 24 FPS full video."""
-    import cv2
+    """Paste the generated rectangular head+hair patch back onto the 24 FPS full video
+    using sub-pixel border phase alignment + 2D spatial illumination field + 2-band Laplacian blending.
+    Optionally draws the 'Kotak Tempel' outline when ``show_paste_box=True``.
+    """
     import numpy as np
-    from mosaicdiff.head_detector import create_crop_head_mask
+    from mosaicdiff.head_detector import draw_paste_box_outline, seamless_paste_rectangle
     from mosaicdiff.videoio import VideoWriter, copy_audio, open_capture
 
     orig_path = Path(crop_info["orig_video_path"]).resolve()
@@ -533,10 +579,12 @@ def composite_crop_to_full_video(
     frame_count = int(crop_info["orig_frame_count"])
     crop_boxes: list[tuple[int, int, int, int]] = crop_info["crop_boxes"]
     head_boxes: list[tuple[int, int, int, int] | None] = crop_info["head_boxes"]
+    draw_box = bool(crop_info.get("show_paste_box", False)) if show_paste_box is None else bool(show_paste_box)
 
     if log_cb:
+        outline_note = " + Outline Kotak Tempel AKTIF" if draw_box else ""
         log_cb(
-            f"🎬 Menempelkan (compositing) rectangle kepala+rambut kembali ke video utuh 24 FPS ({orig_w}x{orig_h})..."
+            f"🎬 Menempelkan (Multi-Band Seamless Compositing{outline_note}) kembali ke video utuh 24 FPS ({orig_w}x{orig_h})..."
         )
 
     cap_orig, _, _, _, _ = open_capture(orig_path)
@@ -546,9 +594,7 @@ def composite_crop_to_full_video(
     writer = VideoWriter(silent_tmp, orig_w, orig_h, Fraction(TARGET_FPS, 1))
 
     last_gen_frame: np.ndarray | None = None
-    diff_ema: np.ndarray | None = None
-    cached_alpha: np.ndarray | None = None
-    cached_cbox: tuple[int, int, int, int] | None = None
+    blend_state: dict = {}
     idx = 0
     try:
         while idx < frame_count:
@@ -567,40 +613,15 @@ def composite_crop_to_full_video(
             cbox = crop_boxes[idx] if idx < len(crop_boxes) else (crop_boxes[-1] if crop_boxes else None)
 
             if gen_frame is not None and cbox is not None:
-                cx1, cy1, cx2, cy2 = cbox
-                cx1 = max(0, cx1)
-                cy1 = max(0, cy1)
-                cx2 = min(orig_frame.shape[1], cx2)
-                cy2 = min(orig_frame.shape[0], cy2)
-                cw = cx2 - cx1
-                ch = cy2 - cy1
-
-                if cw > 4 and ch > 4:
-                    patch = gen_frame
-                    if patch.shape[1] != cw or patch.shape[0] != ch:
-                        patch = cv2.resize(patch, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
-
-                    # Pure rectangular feathered mask at fixed static coordinates
-                    cur_box = (cx1, cy1, cx2, cy2)
-                    if cached_alpha is None or cached_cbox != cur_box:
-                        cached_alpha = create_crop_head_mask(cur_box, hbox)
-                        cached_cbox = cur_box
-                    alpha = cached_alpha
-
-                    orig_region = orig_frame[cy1:cy2, cx1:cx2].astype(np.float32)
-                    patch_f32 = patch.astype(np.float32)
-
-                    # Temporally smoothed border-ring luminance/color harmonization (zero flicker)
-                    ring_mask = (alpha[:, :, 0] > 0.05) & (alpha[:, :, 0] < 0.45)
-                    if np.count_nonzero(ring_mask) > 32:
-                        diff = np.mean(orig_region[ring_mask] - patch_f32[ring_mask], axis=0)
-                        diff = np.clip(diff, -14.0, 14.0)
-                        diff_ema = diff if diff_ema is None else (0.85 * diff_ema + 0.15 * diff)
-                        patch_f32 = np.clip(patch_f32 + diff_ema, 0.0, 255.0)
-
-                    blended = orig_region * (1.0 - alpha) + patch_f32 * alpha
-                    orig_frame = orig_frame.copy()
-                    orig_frame[cy1:cy2, cx1:cx2] = np.clip(np.round(blended), 0, 255).astype(np.uint8)
+                orig_frame = seamless_paste_rectangle(
+                    orig_frame=orig_frame,
+                    gen_patch=gen_frame,
+                    crop_box=cbox,
+                    head_box=hbox,
+                    state=blend_state,
+                )
+                if draw_box:
+                    orig_frame = draw_paste_box_outline(orig_frame, cbox, hbox)
 
             writer.write(orig_frame)
             idx += 1
@@ -794,6 +815,7 @@ def patch_bfs_prompt(
     aspect_ratio: str = "auto",
     comfy_root: str | Path = "/content/ComfyUI",
     crop_head_only: bool = True,
+    show_paste_box: bool = False,
     log_cb=print,
 ) -> dict:
     """Patch the API prompt graph nodes with user-provided parameters.
@@ -810,6 +832,8 @@ def patch_bfs_prompt(
             video_input_path=video_input_path,
             head_image_path=head_image_path,
             comfy_root=comfy_root,
+            resolution_mp=resolution_mp,
+            show_paste_box=show_paste_box,
             log_cb=log_cb,
         )
         guide_video_for_comfy = Path(crop_info["crop_video_path"]).resolve()
@@ -941,7 +965,10 @@ def patch_bfs_prompt(
             elif ctype == "VHS_VideoCombine" and ("comparison" in str(inputs).lower() or nid == "491"):
                 nodes_to_remove.append(nid)
 
-        # 12. Math Expression for video length (Node 455)
+        # 12. Math Expression for video length (Node 455) and LTXMultipleControls exact guide alignment
+        if ctype == "LTXMultipleControls" and crop_info is not None:
+            inputs["guide_ref_resize_mode"] = "match_target"
+
         if nid == "455" or (ctype == "ComfyMathExpression" and "b" in str(inputs.get("expression", ""))):
             if "values.b" not in inputs and "b" not in inputs:
                 inputs["values.b"] = ["430", 0]
@@ -961,6 +988,7 @@ def run_comfy_workflow(
     host: str = "127.0.0.1",
     port: int = 8188,
     comfy_root: str | Path = "/content/ComfyUI",
+    show_paste_box: bool | None = None,
     log_cb=print,
     progress_cb=None,
     cancel_event=None,
@@ -1181,6 +1209,7 @@ def run_comfy_workflow(
             crop_info=crop_info,
             generated_crop_video=out_video_path,
             dest_file=target_dst,
+            show_paste_box=show_paste_box,
             log_cb=log_cb,
         )
         return final_video

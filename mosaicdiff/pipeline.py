@@ -26,7 +26,9 @@ from mosaicdiff.geometry import (
 from mosaicdiff.head_detector import (
     HeadDetector,
     create_crop_head_mask,
+    draw_paste_box_outline,
     lock_single_actor_trajectory,
+    seamless_paste_rectangle,
     smooth_head_trajectory,
 )
 from mosaicdiff.align import HeadAligner
@@ -282,35 +284,20 @@ def _paste(
     patch: np.ndarray,
     crop_box: tuple[int, int, int, int],
     head_box: tuple[int, int, int, int] | None = None,
+    state: dict | None = None,
+    show_paste_box: bool = False,
 ) -> np.ndarray:
-    """Paste the full generated rectangle ``patch`` onto ``frame`` with feathered rectangular borders."""
-    x1, y1, x2, y2 = crop_box
-    x1 = max(0, x1)
-    y1 = max(0, y1)
-    x2 = min(frame.shape[1], x2)
-    y2 = min(frame.shape[0], y2)
-    if x2 <= x1 or y2 <= y1:
-        return frame
-    cw = x2 - x1
-    ch = y2 - y1
-    fitted = patch
-    if fitted.shape[1] != cw or fitted.shape[0] != ch:
-        fitted = cv2.resize(fitted, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
-
-    fade = create_crop_head_mask((x1, y1, x2, y2), head_box)
-    base = frame.copy()
-    region = base[y1:y2, x1:x2].astype(np.float32)
-    patch_f32 = fitted.astype(np.float32)
-
-    ring = (fade[:, :, 0] > 0.05) & (fade[:, :, 0] < 0.45)
-    if np.count_nonzero(ring) > 32:
-        diff = np.mean(region[ring] - patch_f32[ring], axis=0)
-        diff = np.clip(diff, -14.0, 14.0)
-        patch_f32 = np.clip(patch_f32 + diff, 0.0, 255.0)
-
-    mixed = region * (1.0 - fade) + patch_f32 * fade
-    base[y1:y2, x1:x2] = np.clip(np.round(mixed), 0, 255).astype(np.uint8)
-    return base
+    """Paste the full generated rectangle ``patch`` onto ``frame`` with multi-band seamless blending."""
+    out = seamless_paste_rectangle(
+        orig_frame=frame,
+        gen_patch=patch,
+        crop_box=crop_box,
+        head_box=head_box,
+        state=state,
+    )
+    if show_paste_box:
+        out = draw_paste_box_outline(out, crop_box, head_box)
+    return out
 
 
 def _h3(source_24, comp_path, destination, settings: Settings, crop, head_boxes, boxes, fps, log, progress, cancel) -> None:
@@ -409,7 +396,8 @@ def _h3(source_24, comp_path, destination, settings: Settings, crop, head_boxes,
                 image = out_dir / f"{order:06d}.png"
                 if image.is_file():
                     pastes[int(frame_idx)] = image
-        _write_output(source_24, destination, pastes, crop, head_boxes)
+        show_paste_box = bool(getattr(settings, "show_paste_box", False))
+        _write_output(source_24, destination, pastes, crop, head_boxes, show_paste_box=show_paste_box)
         if settings.compare:
             compare_path = destination.with_name(destination.stem + "_compare" + destination.suffix)
             try:
@@ -462,9 +450,10 @@ def _run_comfy(python: Path, job_path: Path, log, cancel) -> None:
         raise RuntimeError(f"LTX-2.5 diffusion process exited with status {code}")
 
 
-def _write_output(source_24_path, destination, pastes, crop, head_boxes) -> None:
+def _write_output(source_24_path, destination, pastes, crop, head_boxes, show_paste_box: bool = False) -> None:
     capture, width, height, _fps, _count = open_capture(source_24_path)
     writer = VideoWriter(destination, width, height, Fraction(TARGET_FPS, 1))
+    blend_state: dict = {}
     index = 0
     try:
         while True:
@@ -473,10 +462,17 @@ def _write_output(source_24_path, destination, pastes, crop, head_boxes) -> None
                 break
             image_path = pastes.get(index)
             hbox = head_boxes[index] if index < len(head_boxes) else None
-            if image_path is not None and hbox is not None:
+            if image_path is not None:
                 patch = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
                 if patch is not None:
-                    frame = _paste(frame, patch, crop, head_box=hbox)
+                    frame = _paste(
+                        frame,
+                        patch,
+                        crop,
+                        head_box=hbox,
+                        state=blend_state,
+                        show_paste_box=show_paste_box,
+                    )
             writer.write(frame)
             index += 1
     finally:

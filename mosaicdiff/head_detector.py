@@ -655,14 +655,233 @@ class HeadDetector:
 def create_crop_head_mask(
     crop_box: tuple[int, int, int, int],
     head_box: tuple[int, int, int, int] | None = None,
+    frame_w: int = 0,
+    frame_h: int = 0,
 ) -> np.ndarray:
-    """Create a rectangular feathered 3D float32 mask (H_crop, W_crop, 1) with smooth edge feathering."""
+    """Create a wide, smooth raised-cosine + Gaussian-rounded rectangular feather mask (H_crop, W_crop, 1)."""
     cx1, cy1, cx2, cy2 = crop_box
     cw = max(2, cx2 - cx1)
     ch = max(2, cy2 - cy1)
     short = min(cw, ch)
-    falloff = max(18, min(round(short * 0.10), short // 5))
-    return edge_fade(ch, cw, falloff)
+    falloff = max(26, min(round(short * 0.16), short // 3))
+
+    # Raised cosine ramp (0.5 - 0.5 * cos(pi * t)) for ultra-smooth zero-derivative endpoints
+    d_top = np.arange(ch, dtype=np.float32) if (frame_h <= 0 or cy1 > 2) else np.full(ch, float(falloff), dtype=np.float32)
+    d_bot = np.arange(ch, dtype=np.float32)[::-1] if (frame_h <= 0 or cy2 < frame_h - 2) else np.full(ch, float(falloff), dtype=np.float32)
+    d_left = np.arange(cw, dtype=np.float32) if (frame_w <= 0 or cx1 > 2) else np.full(cw, float(falloff), dtype=np.float32)
+    d_right = np.arange(cw, dtype=np.float32)[::-1] if (frame_w <= 0 or cx2 < frame_w - 2) else np.full(cw, float(falloff), dtype=np.float32)
+
+    ty = np.minimum(d_top, d_bot).clip(0.0, float(falloff)) / float(max(1, falloff))
+    tx = np.minimum(d_left, d_right).clip(0.0, float(falloff)) / float(max(1, falloff))
+
+    ry = 0.5 - 0.5 * np.cos(np.pi * ty)
+    rx = 0.5 - 0.5 * np.cos(np.pi * tx)
+    mask2d = (ry[:, None] * rx[None, :]).astype(np.float32)
+
+    # Softly round the 4 rectangle corners and smooth the transition
+    kblur = max(5, (falloff // 2) | 1)
+    mask2d = cv2.GaussianBlur(mask2d, (kblur, kblur), 0)
+    # Re-zero the outermost 1px on interior edges so there is never a hard step at the boundary
+    if frame_h <= 0 or cy1 > 2:
+        mask2d[0, :] = 0.0
+    if frame_h <= 0 or cy2 < frame_h - 2:
+        mask2d[-1, :] = 0.0
+    if frame_w <= 0 or cx1 > 2:
+        mask2d[:, 0] = 0.0
+    if frame_w <= 0 or cx2 < frame_w - 2:
+        mask2d[:, -1] = 0.0
+
+    return np.clip(mask2d, 0.0, 1.0)[:, :, None]
+
+
+def seamless_paste_rectangle(
+    orig_frame: np.ndarray,
+    gen_patch: np.ndarray,
+    crop_box: tuple[int, int, int, int],
+    head_box: tuple[int, int, int, int] | None = None,
+    state: dict | None = None,
+) -> np.ndarray:
+    """Align and multi-band blend the generated rectangular patch onto ``orig_frame``.
+
+    1. Sub-pixel phase correlation on border gradients corrects any 1-5 px shift from VAE upsampling.
+    2. 2D spatial border illumination field matches top, side, and chest/stomach lighting independently.
+    3. 2-band Laplacian pyramid blending merges low-frequency lighting and high-frequency hair/skin detail seamlessly.
+    """
+    fh, fw = orig_frame.shape[:2]
+    cx1, cy1, cx2, cy2 = crop_box
+    cx1 = max(0, cx1)
+    cy1 = max(0, cy1)
+    cx2 = min(fw, cx2)
+    cy2 = min(fh, cy2)
+    cw = cx2 - cx1
+    ch = cy2 - cy1
+    if cw <= 4 or ch <= 4:
+        return orig_frame
+
+    patch = gen_patch
+    if patch.shape[1] != cw or patch.shape[0] != ch:
+        patch = cv2.resize(patch, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
+
+    cur_box = (cx1, cy1, cx2, cy2)
+    if state is not None and state.get("cached_box") == cur_box and state.get("cached_alpha") is not None:
+        alpha = state["cached_alpha"]
+        alpha_low = state["cached_alpha_low"]
+        alpha_high = state["cached_alpha_high"]
+    else:
+        alpha = create_crop_head_mask(cur_box, head_box, frame_w=fw, frame_h=fh)
+        short = min(cw, ch)
+        k_low = max(15, (short // 8) | 1)
+        alpha_low = cv2.GaussianBlur(alpha[:, :, 0], (k_low, k_low), 0)[:, :, None]
+        # Zero outer 1px on interior edges for alpha_low
+        if cy1 > 2:
+            alpha_low[0, :, :] = 0.0
+        if cy2 < fh - 2:
+            alpha_low[-1, :, :] = 0.0
+        if cx1 > 2:
+            alpha_low[:, 0, :] = 0.0
+        if cx2 < fw - 2:
+            alpha_low[:, -1, :] = 0.0
+        alpha_high = np.clip((alpha - 0.12) / 0.72, 0.0, 1.0)
+        if state is not None:
+            state["cached_box"] = cur_box
+            state["cached_alpha"] = alpha
+            state["cached_alpha_low"] = alpha_low
+            state["cached_alpha_high"] = alpha_high
+
+    orig_region = orig_frame[cy1:cy2, cx1:cx2].astype(np.float32)
+    patch_f32 = patch.astype(np.float32)
+
+    # 1. Sub-pixel Border Phase Alignment (corrects any translational offset from LTXVLatentUpsampler / VAE)
+    border_weight = ((alpha[:, :, 0] > 0.02) & (alpha[:, :, 0] < 0.65)).astype(np.float32)
+    if np.count_nonzero(border_weight) > 128 and cw >= 48 and ch >= 48:
+        try:
+            orig_g = cv2.cvtColor(orig_region, cv2.COLOR_BGR2GRAY)
+            patch_g = cv2.cvtColor(patch_f32, cv2.COLOR_BGR2GRAY)
+            ox = cv2.Sobel(orig_g, cv2.CV_32F, 1, 0, ksize=3)
+            oy = cv2.Sobel(orig_g, cv2.CV_32F, 0, 1, ksize=3)
+            px = cv2.Sobel(patch_g, cv2.CV_32F, 1, 0, ksize=3)
+            py = cv2.Sobel(patch_g, cv2.CV_32F, 0, 1, ksize=3)
+            o_mag = np.hypot(ox, oy) * border_weight
+            p_mag = np.hypot(px, py) * border_weight
+            (dx, dy), resp = cv2.phaseCorrelate(p_mag, o_mag)
+            if resp > 0.04 and abs(dx) <= 6.0 and abs(dy) <= 6.0:
+                shift = np.array([float(dx), float(dy)], dtype=np.float32)
+            else:
+                shift = np.zeros(2, dtype=np.float32)
+        except Exception:
+            shift = np.zeros(2, dtype=np.float32)
+
+        if state is not None:
+            prev_shift = state.get("shift_ema")
+            shift_ema = shift if prev_shift is None else (0.90 * prev_shift + 0.10 * shift)
+            state["shift_ema"] = shift_ema
+        else:
+            shift_ema = shift
+
+        if abs(float(shift_ema[0])) > 0.15 or abs(float(shift_ema[1])) > 0.15:
+            mat = np.array([[1.0, 0.0, float(shift_ema[0])], [0.0, 1.0, float(shift_ema[1])]], dtype=np.float32)
+            patch_f32 = cv2.warpAffine(
+                patch_f32,
+                mat,
+                (cw, ch),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+
+    # 2. 2D Spatially-Varying Border Color & Luminance Harmonization Field
+    ring_w = np.clip((0.60 - alpha[:, :, 0]) / 0.55, 0.0, 1.0) * (alpha[:, :, 0] > 0.01).astype(np.float32)
+    if np.sum(ring_w) > 32.0:
+        raw_diff = (orig_region - patch_f32) * ring_w[:, :, None]
+        grid_w, grid_h = 16, 16
+        small_num = cv2.resize(raw_diff, (grid_w, grid_h), interpolation=cv2.INTER_AREA)
+        small_den = cv2.resize(ring_w, (grid_w, grid_h), interpolation=cv2.INTER_AREA)[:, :, None]
+        small_num = cv2.GaussianBlur(small_num, (9, 9), 0)
+        small_den = cv2.GaussianBlur(small_den, (9, 9), 0)
+        global_diff = np.sum(raw_diff, axis=(0, 1)) / max(1.0, float(np.sum(ring_w)))
+        coarse_field = np.where(small_den > 1e-3, small_num / np.maximum(small_den, 1e-3), global_diff[None, None, :])
+        coarse_field = cv2.GaussianBlur(coarse_field.astype(np.float32), (7, 7), 0)
+        diff_field = cv2.resize(coarse_field, (cw, ch), interpolation=cv2.INTER_LINEAR)
+        diff_field = np.clip(diff_field, -22.0, 22.0)
+
+        if state is not None:
+            prev_field = state.get("diff_field_ema")
+            if prev_field is not None and prev_field.shape == diff_field.shape:
+                diff_field = 0.85 * prev_field + 0.15 * diff_field
+            state["diff_field_ema"] = diff_field
+
+        patch_f32 = np.clip(patch_f32 + diff_field, 0.0, 255.0)
+
+    # 3. 2-Band Frequency (Laplacian Pyramid) Blending
+    short = min(cw, ch)
+    k_band = max(15, (short // 10) | 1)
+    orig_low = cv2.GaussianBlur(orig_region, (k_band, k_band), 0)
+    patch_low = cv2.GaussianBlur(patch_f32, (k_band, k_band), 0)
+    orig_high = orig_region - orig_low
+    patch_high = patch_f32 - patch_low
+
+    blended_low = orig_low * (1.0 - alpha_low) + patch_low * alpha_low
+    blended_high = orig_high * (1.0 - alpha_high) + patch_high * alpha_high
+    blended = np.clip(np.round(blended_low + blended_high), 0, 255).astype(np.uint8)
+
+    out = orig_frame.copy()
+    out[cy1:cy2, cx1:cx2] = blended
+    return out
+
+
+def draw_paste_box_outline(
+    frame: np.ndarray,
+    crop_box: tuple[int, int, int, int],
+    head_box: tuple[int, int, int, int] | None = None,
+) -> np.ndarray:
+    """Draw a clear high-contrast outline of the pasted generation rectangle ('Kotak Tempel') on ``frame``."""
+    out = frame.copy()
+    fh, fw = out.shape[:2]
+    cx1, cy1, cx2, cy2 = crop_box
+    cx1 = max(0, min(fw - 1, cx1))
+    cy1 = max(0, min(fh - 1, cy1))
+    cx2 = max(cx1 + 1, min(fw - 1, cx2))
+    cy2 = max(cy1 + 1, min(fh - 1, cy2))
+    cw = cx2 - cx1
+    ch = cy2 - cy1
+
+    # 1. Outer dark shadow + bright neon green/cyan outline for the exact pasted rectangle
+    cv2.rectangle(out, (cx1, cy1), (cx2, cy2), (15, 20, 15), 4, cv2.LINE_AA)
+    cv2.rectangle(out, (cx1, cy1), (cx2, cy2), (0, 255, 140), 2, cv2.LINE_AA)
+
+    # 2. Inner feather boundary guide (shows where feathering transition finishes)
+    short = min(cw, ch)
+    falloff = max(26, min(round(short * 0.16), short // 3))
+    ix1 = min(cx2, cx1 + falloff) if cx1 > 2 else cx1
+    iy1 = min(cy2, cy1 + falloff) if cy1 > 2 else cy1
+    ix2 = max(cx1, cx2 - falloff) if cx2 < fw - 3 else cx2
+    iy2 = max(cy1, cy2 - falloff) if cy2 < fh - 3 else cy2
+    if ix2 > ix1 + 8 and iy2 > iy1 + 8:
+        cv2.rectangle(out, (ix1, iy1), (ix2, iy2), (255, 210, 0), 1, cv2.LINE_AA)
+
+    # 3. Corner L-brackets for crisp visual reference
+    arm = max(12, min(28, short // 8))
+    for bx, by, sx, sy in [
+        (cx1, cy1, 1, 1),
+        (cx2, cy1, -1, 1),
+        (cx1, cy2, 1, -1),
+        (cx2, cy2, -1, -1),
+    ]:
+        cv2.line(out, (bx, by), (bx + sx * arm, by), (0, 255, 255), 3, cv2.LINE_AA)
+        cv2.line(out, (bx, by), (bx, by + sy * arm), (0, 255, 255), 3, cv2.LINE_AA)
+
+    # 4. Label badge showing exact dimensions of the generated rectangle
+    label = f"KOTAK TEMPEL (GENERATE): {cw}x{ch}px [{cx1},{cy1}]"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = max(0.45, min(0.65, fw / 1200.0))
+    thick = 1 if scale < 0.55 else 2
+    (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
+    ly1 = max(0, cy1 - th - 12) if cy1 >= th + 14 else cy1 + 4
+    lx1 = max(0, min(fw - tw - 12, cx1))
+    cv2.rectangle(out, (lx1, ly1), (lx1 + tw + 10, ly1 + th + 8), (15, 20, 15), -1)
+    cv2.rectangle(out, (lx1, ly1), (lx1 + tw + 10, ly1 + th + 8), (0, 255, 140), 1, cv2.LINE_AA)
+    cv2.putText(out, label, (lx1 + 5, ly1 + th + 3), font, scale, (0, 255, 160), thick, cv2.LINE_AA)
+
+    return out
 
 
 def lock_single_actor_trajectory(
