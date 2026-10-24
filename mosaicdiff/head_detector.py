@@ -368,12 +368,13 @@ class HeadDetector:
         left_r = 0.28 + yaw_left
         top_r = 0.48
         right_r = 0.28 + yaw_right
-        bot_r = 0.18
+        bot_r = 0.22
 
-        sx1 = max(0, int(round(cx - fw * 1.60)))
-        sx2 = min(w, int(round(cx + fw * 1.60)))
-        sy1 = max(0, int(round(fy1 - fh * 0.90)))
-        sy2 = min(h, int(round(fy2 + fh * 2.50)))
+        # Search window reaches 3.8x face height below chin to cover chest and stomach hair
+        sx1 = max(0, int(round(cx - fw * 1.85)))
+        sx2 = min(w, int(round(cx + fw * 1.85)))
+        sy1 = max(0, int(round(fy1 - fh * 0.95)))
+        sy2 = min(h, int(round(fy2 + fh * 3.80)))
 
         if sx2 - sx1 < 16 or sy2 - sy1 < 16:
             return (left_r, top_r, right_r, bot_r)
@@ -382,7 +383,7 @@ class HeadDetector:
 
         # Sample background from top-left and top-right corners of search window
         bw_strip = max(4, (sx2 - sx1) // 10)
-        bh_strip = max(4, (sy2 - sy1) // 12)
+        bh_strip = max(4, (sy2 - sy1) // 14)
         bg_left = lab[sy1 : sy1 + bh_strip, sx1 : sx1 + bw_strip].reshape(-1, 3)
         bg_right = lab[sy1 : sy1 + bh_strip, sx2 - bw_strip : sx2].reshape(-1, 3)
         bg_all = np.concatenate([b for b in (bg_left, bg_right) if b.size > 0], axis=0)
@@ -395,13 +396,12 @@ class HeadDetector:
         seg = self.get_person_segmentation(frame_bgr)
         seg_roi = seg[sy1:sy2, sx1:sx2] if seg is not None else None
 
-        # PART A: Upper head & back-of-head zone (from top of search box down to chin level fy2 + 0.10*fh)
-        # Everything in the foreground silhouette above chin level IS the head/cranium/hair!
-        chin_y_rel = min(sy2 - sy1, max(1, int(round(fy2 + fh * 0.10)) - sy1))
+        # PART A: Upper head & back-of-head zone (from top of search box down to chin level fy2 + 0.12*fh)
+        chin_y_rel = min(sy2 - sy1, max(1, int(round(fy2 + fh * 0.12)) - sy1))
         if seg_roi is not None:
-            upper_fg = (seg_roi[:chin_y_rel, :] > 0.38) & (dist_bg[:chin_y_rel, :] > 1.25)
+            upper_fg = (seg_roi[:chin_y_rel, :] > 0.35) & (dist_bg[:chin_y_rel, :] > 1.20)
         else:
-            upper_fg = dist_bg[:chin_y_rel, :] > 1.85
+            upper_fg = dist_bg[:chin_y_rel, :] > 1.80
 
         upper_u8 = upper_fg.astype(np.uint8) * 255
         k_upper = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
@@ -410,9 +410,9 @@ class HeadDetector:
 
         # Keep connected component overlapping the face/cranium
         n_lbl, lbls, stats, _ = cv2.connectedComponentsWithStats(upper_u8, connectivity=8)
-        f_rx1 = max(0, int(fx1 - fw * 0.35) - sx1)
-        f_rx2 = min(sx2 - sx1, int(fx2 + fw * 0.35) - sx1)
-        f_ry1 = max(0, int(fy1 - fh * 0.45) - sy1)
+        f_rx1 = max(0, int(fx1 - fw * 0.38) - sx1)
+        f_rx2 = min(sx2 - sx1, int(fx2 + fw * 0.38) - sx1)
+        f_ry1 = max(0, int(fy1 - fh * 0.48) - sy1)
         f_ry2 = min(chin_y_rel, int(fy2) - sy1)
 
         head_upper = np.zeros_like(upper_u8)
@@ -428,11 +428,11 @@ class HeadDetector:
             u_min_x = float(np.percentile(u_xs, 2)) + sx1
             u_max_x = float(np.percentile(u_xs, 98)) + sx1
 
-            left_r = float(np.clip(max(left_r, (fx1 - u_min_x) / fw + 0.06), 0.28, 1.15))
-            top_r = float(np.clip(max(top_r, (fy1 - u_min_y) / fh + 0.08), 0.48, 1.10))
-            right_r = float(np.clip(max(right_r, (u_max_x - fx2) / fw + 0.06), 0.28, 1.15))
+            left_r = float(np.clip(max(left_r, (fx1 - u_min_x) / fw + 0.08), 0.28, 1.35))
+            top_r = float(np.clip(max(top_r, (fy1 - u_min_y) / fh + 0.10), 0.48, 1.20))
+            right_r = float(np.clip(max(right_r, (u_max_x - fx2) / fw + 0.08), 0.28, 1.35))
 
-        # PART B: Long hair extending below the chin (from fy1 down to sy2)
+        # PART B: Long hair extending down over neck, shoulders, chest, and stomach (up to fy2 + 3.8*fh)
         skin_x1 = max(0, int(fx1 + fw * 0.22))
         skin_x2 = min(w, int(fx2 - fw * 0.22))
         skin_y1 = max(0, int(fy1 + fh * 0.20))
@@ -440,64 +440,154 @@ class HeadDetector:
         skin_patch = lab[skin_y1:skin_y2, skin_x1:skin_x2]
         skin_mean = np.mean(skin_patch, axis=(0, 1)) if skin_patch.size > 0 else np.array([150.0, 135.0, 140.0])
 
-        # Sample hair pixels from the detected upper head region outside the inner face box
-        upper_hair_mask = head_upper > 0
+        # Sample hair reference pixels from BOTH:
+        # 1) Upper head outside inner face box (crown/temples)
+        # 2) Side-lock zones beside cheeks/jaw/neck (where long hair drapes down onto the chest)
+        sample_y2 = min(sy2 - sy1, max(chin_y_rel, int(round(fy2 + fh * 0.65)) - sy1))
+        hair_sample_mask = np.zeros((sample_y2, sx2 - sx1), dtype=bool)
+        hair_sample_mask[:chin_y_rel, :] = head_upper > 0
+
+        side_lx1 = max(0, int(round(fx1 - fw * 0.75)) - sx1)
+        side_lx2 = min(sx2 - sx1, max(0, int(round(fx1 + fw * 0.05)) - sx1))
+        side_rx1 = max(0, int(round(fx2 - fw * 0.05)) - sx1)
+        side_rx2 = min(sx2 - sx1, int(round(fx2 + fw * 0.75)) - sx1)
+        side_y1 = max(0, int(round(fy1)) - sy1)
+        if sample_y2 > side_y1:
+            if side_lx2 > side_lx1:
+                hair_sample_mask[side_y1:sample_y2, side_lx1:side_lx2] = True
+            if side_rx2 > side_rx1:
+                hair_sample_mask[side_y1:sample_y2, side_rx1:side_rx2] = True
+
+        # Exclude inner face box from hair reference sampling
         inner_fx1 = max(0, int(fx1) - sx1)
         inner_fx2 = min(sx2 - sx1, int(fx2) - sx1)
         inner_fy1 = max(0, int(fy1) - sy1)
-        inner_fy2 = min(chin_y_rel, int(fy2) - sy1)
+        inner_fy2 = min(sample_y2, int(fy2) - sy1)
         if inner_fx2 > inner_fx1 and inner_fy2 > inner_fy1:
-            upper_hair_mask[inner_fy1:inner_fy2, inner_fx1:inner_fx2] = False
+            hair_sample_mask[inner_fy1:inner_fy2, inner_fx1:inner_fx2] = False
 
-        hair_pixels = roi_lab[:chin_y_rel, :][upper_hair_mask]
+        if seg_roi is not None:
+            hair_sample_mask = hair_sample_mask & (seg_roi[:sample_y2, :] > 0.40) & (dist_bg[:sample_y2, :] > 1.25)
+        else:
+            hair_sample_mask = hair_sample_mask & (dist_bg[:sample_y2, :] > 1.75)
+
+        hair_pixels = roi_lab[:sample_y2, :][hair_sample_mask]
         if len(hair_pixels) >= 24:
             dist_hp_skin = np.linalg.norm(hair_pixels - skin_mean, axis=1)
-            valid_hp = hair_pixels[dist_hp_skin > 15.0]
+            valid_hp = hair_pixels[dist_hp_skin > 13.0]
             if len(valid_hp) >= 16:
                 hair_median = np.median(valid_hp, axis=0)
-                hair_std = np.clip(np.std(valid_hp, axis=0), 9.0, 26.0)
-                dist_hair = np.linalg.norm((roi_lab - hair_median) / (hair_std * 1.45), axis=2)
+                hair_p20 = np.percentile(valid_hp, 20, axis=0)
+                hair_p80 = np.percentile(valid_hp, 80, axis=0)
+                hair_std = np.clip(np.std(valid_hp, axis=0), 10.0, 28.0)
+
+                # Chroma-weighted scale: downweight L (channel 0) so shadowed/highlighted hair on chest & stomach matches crown hair
+                chroma_scale = hair_std * np.array([2.25, 1.55, 1.55], dtype=np.float32)
+                dist_med = np.linalg.norm((roi_lab - hair_median) / chroma_scale, axis=2)
+                dist_p20 = np.linalg.norm((roi_lab - hair_p20) / chroma_scale, axis=2)
+                dist_p80 = np.linalg.norm((roi_lab - hair_p80) / chroma_scale, axis=2)
+                dist_hair = np.minimum(dist_med, np.minimum(dist_p20, dist_p80))
+
+                # Also sample specifically from jaw/neck side-locks (closest in lighting to chest & stomach hair)
+                jaw_y1 = min(sample_y2, max(0, int(round(fy2 - fh * 0.25)) - sy1))
+                if sample_y2 > jaw_y1:
+                    jaw_mask = hair_sample_mask[jaw_y1:sample_y2, :]
+                    jaw_hp = roi_lab[jaw_y1:sample_y2, :][jaw_mask]
+                    if len(jaw_hp) >= 16:
+                        jaw_valid = jaw_hp[np.linalg.norm(jaw_hp - skin_mean, axis=1) > 13.0]
+                        if len(jaw_valid) >= 12:
+                            jaw_med = np.median(jaw_valid, axis=0)
+                            dist_jaw = np.linalg.norm((roi_lab - jaw_med) / chroma_scale, axis=2)
+                            dist_hair = np.minimum(dist_hair, dist_jaw)
+
                 dist_skin = np.linalg.norm(roi_lab - skin_mean, axis=2)
 
-                full_hair = (dist_hair < 1.55) & (dist_skin > 16.0) & (dist_bg > 1.35)
+                full_hair = (dist_hair < 1.85) & (dist_skin > 13.0) & (dist_bg > 1.20)
                 if seg_roi is not None:
-                    full_hair = full_hair & (seg_roi > 0.45)
+                    full_hair = full_hair & (seg_roi > 0.35)
 
-                # Exclude central throat/chest directly below chin so shirt is not merged with hair
-                neck_x1 = max(0, int(fx1 + fw * 0.16) - sx1)
-                neck_x2 = min(sx2 - sx1, int(fx2 - fw * 0.16) - sx1)
-                neck_y1 = max(0, int(fy2 + fh * 0.08) - sy1)
-                if neck_x2 > neck_x1 and neck_y1 < (sy2 - sy1):
-                    full_hair[neck_y1:, neck_x1:neck_x2] = False
+                # Exclude only the inner face & upper throat skin (NEVER erase chest or stomach!)
+                face_throat_y2 = min(sy2 - sy1, max(0, int(round(fy2 + fh * 0.14)) - sy1))
+                ft_x1 = max(0, int(round(fx1 + fw * 0.14)) - sx1)
+                ft_x2 = min(sx2 - sx1, int(round(fx2 - fw * 0.14)) - sx1)
+                if ft_x2 > ft_x1 and face_throat_y2 > inner_fy1:
+                    full_hair[inner_fy1:face_throat_y2, ft_x1:ft_x2] = False
 
+                # Restrict lower chest/stomach region (below shoulders) to the natural chest/stomach width corridor
+                chest_y1 = min(sy2 - sy1, max(0, int(round(fy2 + fh * 0.45)) - sy1))
+                corridor_x1 = max(0, int(round(cx - fw * 1.40)) - sx1)
+                corridor_x2 = min(sx2 - sx1, int(round(cx + fw * 1.40)) - sx1)
+                if chest_y1 < (sy2 - sy1):
+                    if corridor_x1 > 0:
+                        full_hair[chest_y1:, :corridor_x1] = False
+                    if corridor_x2 < (sx2 - sx1):
+                        full_hair[chest_y1:, corridor_x2:] = False
+
+                # Check if BOTH outer arm flanks simultaneously match hair color (e.g. solid shirt of identical color)
+                roi_l = roi_lab[:, :, 0]
+                sobel_x = np.abs(cv2.Sobel(roi_l, cv2.CV_32F, 1, 0, ksize=3))
+                strand_tex = cv2.GaussianBlur(sobel_x, (9, 9), 0)
+
+                sh_y1 = min(sy2 - sy1, max(0, int(round(fy2 + fh * 0.90)) - sy1))
+                sh_y2 = min(sy2 - sy1, max(sh_y1 + 1, int(round(fy2 + fh * 2.20)) - sy1))
+                sl_x1 = max(0, int(round(cx - fw * 1.80)) - sx1)
+                sl_x2 = max(sl_x1, int(round(cx - fw * 1.30)) - sx1)
+                sr_x1 = min(sx2 - sx1, int(round(cx + fw * 1.30)) - sx1)
+                sr_x2 = min(sx2 - sx1, int(round(cx + fw * 1.80)) - sx1)
+                left_arm_match = False
+                right_arm_match = False
+                if sh_y2 > sh_y1:
+                    if sl_x2 > sl_x1:
+                        l_patch = dist_hair[sh_y1:sh_y2, sl_x1:sl_x2]
+                        left_arm_match = bool(l_patch.size > 20 and np.mean(l_patch < 1.55) > 0.68)
+                    if sr_x2 > sr_x1:
+                        r_patch = dist_hair[sh_y1:sh_y2, sr_x1:sr_x2]
+                        right_arm_match = bool(r_patch.size > 20 and np.mean(r_patch < 1.55) > 0.68)
+
+                if left_arm_match and right_arm_match and sh_y1 < (sy2 - sy1):
+                    # Only when BOTH outer arms are solidly filled with hair color (identical-color wide shirt),
+                    # require either closer hair color match or vertical hair strand texture on the lower torso
+                    chest_mask = full_hair[sh_y1:, :] & ((dist_hair[sh_y1:, :] < 1.35) | (strand_tex[sh_y1:, :] > 4.2))
+                    full_hair[sh_y1:, :] = chest_mask
+
+                # Bridge gaps across ears/jaw/collar/chest with a large vertical closing kernel so chest & stomach hair connects
                 fh_u8 = full_hair.astype(np.uint8) * 255
-                fh_u8 = cv2.morphologyEx(fh_u8, cv2.MORPH_CLOSE, k_upper)
+                k_vert = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 35))
+                fh_u8 = cv2.morphologyEx(fh_u8, cv2.MORPH_CLOSE, k_vert)
                 num_l, l_map, l_stats, _ = cv2.connectedComponentsWithStats(fh_u8, connectivity=8)
 
+                # Seed hair components from head, behind ears, neck, shoulders, and upper chest (up to fy2 + 1.45*fh)
+                seed_y2 = min(sy2 - sy1, max(chin_y_rel, int(round(fy2 + fh * 1.45)) - sy1))
+                seed_x1 = max(0, int(round(cx - fw * 1.30)) - sx1)
+                seed_x2 = min(sx2 - sx1, int(round(cx + fw * 1.30)) - sx1)
                 conn_hair = np.zeros_like(fh_u8)
-                seed_hair_ids = set(np.unique(l_map[:chin_y_rel, :][head_upper > 0])) - {0}
+                seed_hair_ids = set(np.unique(l_map[:seed_y2, seed_x1:seed_x2])) - {0}
+                min_comp_area = max(40, int(fw * fh * 0.02))
                 for lid in seed_hair_ids:
-                    if l_stats[lid, cv2.CC_STAT_AREA] >= 40:
+                    if l_stats[lid, cv2.CC_STAT_AREA] >= min_comp_area:
                         conn_hair[l_map == lid] = 255
 
-                # Stop downward expansion if width jumps to full torso/shirt width
-                for r_y in range(chin_y_rel, conn_hair.shape[0]):
-                    row_xs = np.where(conn_hair[r_y, :] > 0)[0]
-                    if len(row_xs) == 0:
-                        conn_hair[r_y:, :] = 0
-                        break
-                    if float(row_xs[-1] - row_xs[0]) > fw * 1.55:
-                        conn_hair[r_y:, :] = 0
-                        break
+                # If hair already reaches the neck/shoulders (y > fy2 + 0.35*fh), also include any lower hair locks
+                # on the chest & stomach (up to fy2 + 3.60*fh) that were separated by a collar or necklace
+                h_ys_init, _ = np.where(conn_hair > 0)
+                if len(h_ys_init) > 30 and (float(np.percentile(h_ys_init, 95)) + sy1) > (fy2 + fh * 0.35):
+                    for lid in range(1, num_l):
+                        if lid in seed_hair_ids:
+                            continue
+                        area = l_stats[lid, cv2.CC_STAT_AREA]
+                        comp_x = l_stats[lid, cv2.CC_STAT_LEFT] + l_stats[lid, cv2.CC_STAT_WIDTH] * 0.5
+                        comp_y = l_stats[lid, cv2.CC_STAT_TOP]
+                        if area >= max(60, int(fw * fh * 0.035)) and seed_x1 <= comp_x <= seed_x2 and comp_y >= chin_y_rel:
+                            conn_hair[l_map == lid] = 255
 
                 h_ys, h_xs = np.where(conn_hair > 0)
                 if len(h_ys) > 30:
-                    max_y = float(np.percentile(h_ys, 96)) + sy1
-                    min_x = float(np.percentile(h_xs, 3)) + sx1
-                    max_x = float(np.percentile(h_xs, 97)) + sx1
-                    bot_r = float(np.clip(max(bot_r, (max_y - fy2) / fh + 0.08), 0.18, 2.30))
-                    left_r = float(np.clip(max(left_r, (fx1 - min_x) / fw + 0.06), 0.28, 1.20))
-                    right_r = float(np.clip(max(right_r, (max_x - fx2) / fw + 0.06), 0.28, 1.20))
+                    max_y = float(np.percentile(h_ys, 98.5)) + sy1
+                    min_x = float(np.percentile(h_xs, 2)) + sx1
+                    max_x = float(np.percentile(h_xs, 98)) + sx1
+                    bot_r = float(np.clip(max(bot_r, (max_y - fy2) / fh + 0.22), 0.22, 3.65))
+                    left_r = float(np.clip(max(left_r, (fx1 - min_x) / fw + 0.10), 0.28, 1.40))
+                    right_r = float(np.clip(max(right_r, (max_x - fx2) / fw + 0.10), 0.28, 1.40))
 
         return (left_r, top_r, right_r, bot_r)
 

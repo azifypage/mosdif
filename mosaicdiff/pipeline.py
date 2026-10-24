@@ -214,7 +214,7 @@ def _detect_and_composite(
     target_left = [0.35]
     target_top = [0.48]
     target_right = [0.35]
-    target_bot = [0.18]
+    target_bot = [0.22]
     for f_idx, f_img in sampled_frames.items():
         if f_idx < len(locked) and locked[f_idx] is not None:
             det_kf = locked[f_idx]
@@ -227,10 +227,10 @@ def _detect_and_composite(
             target_bot.append(br)
 
     final_ratios = (
-        max(float(np.percentile(target_left, 90)), src_ratios[0]),
-        max(float(np.percentile(target_top, 90)), src_ratios[1]),
-        max(float(np.percentile(target_right, 90)), src_ratios[2]),
-        max(float(np.percentile(target_bot, 90)), src_ratios[3]),
+        max(float(np.percentile(target_left, 95)), src_ratios[0]),
+        max(float(np.percentile(target_top, 95)), src_ratios[1]),
+        max(float(np.percentile(target_right, 95)), src_ratios[2]),
+        max(float(np.percentile(target_bot, 95)), src_ratios[3]),
     )
     for det in locked:
         if det is not None:

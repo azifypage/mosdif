@@ -372,11 +372,11 @@ def prepare_head_crop_video(
     # 3. Lock onto ONLY 1 primary actor across the entire video
     locked_actor = lock_single_actor_trajectory(all_frame_candidates, width, height)
 
-    # 4. Estimate full head + back-of-head + hair extent (left, top, right, bottom) on sampled keyframes
+    # 4. Estimate full head + back-of-head + chest/stomach hair extent (left, top, right, bottom) on sampled keyframes
     target_left_list = [0.35]
     target_top_list = [0.48]
     target_right_list = [0.35]
-    target_bot_list = [0.18]
+    target_bot_list = [0.22]
     for f_idx, f_img in sampled_frames.items():
         if f_idx < len(locked_actor) and locked_actor[f_idx] is not None:
             det_kf = locked_actor[f_idx]
@@ -390,12 +390,12 @@ def prepare_head_crop_video(
 
     detector.close()
 
-    t_left = float(np.percentile(target_left_list, 90))
-    t_top = float(np.percentile(target_top_list, 90))
-    t_right = float(np.percentile(target_right_list, 90))
-    t_bot = float(np.percentile(target_bot_list, 90))
+    t_left = float(np.percentile(target_left_list, 95))
+    t_top = float(np.percentile(target_top_list, 95))
+    t_right = float(np.percentile(target_right_list, 95))
+    t_bot = float(np.percentile(target_bot_list, 95))
 
-    # Union of Target full-head/hair extent and Source photo head/hair extent (4 independent sides)
+    # Union of Target full-head/chest-stomach hair extent and Source photo head/hair extent (4 independent sides)
     final_ratios = (
         max(t_left, src_ratios[0]),
         max(t_top, src_ratios[1]),
@@ -404,12 +404,12 @@ def prepare_head_crop_video(
     )
     if log_cb:
         log_cb(
-            f"📐 Ekspansi Penuh Kepala+Belakang Kepala+Rambut (+Margin Feather): "
+            f"📐 Ekspansi Penuh Kepala + Belakang Kepala + Rambut Dada/Perut (+Margin Feather): "
             f"Kiri=+{final_ratios[0]*100:.0f}%, Atas=+{final_ratios[1]*100:.0f}%, "
             f"Kanan=+{final_ratios[2]*100:.0f}%, Bawah=+{final_ratios[3]*100:.0f}%"
         )
 
-    # Apply the 4-side expansion ratios + per-frame yaw back-of-head expansion to the locked actor
+    # Apply the 4-side expansion ratios + yaw back-of-head expansion to the locked actor
     for idx, det in enumerate(locked_actor):
         if det is not None:
             fx1, fy1, fx2, fy2 = det["face_box"]
@@ -424,43 +424,40 @@ def prepare_head_crop_video(
                 landmarks=det.get("landmarks"),
             )
 
-    # 5. Zero-phase 3-frame centered smoothing (eliminates 1-frame jitter with ZERO lag)
-    smoothed = smooth_head_trajectory(locked_actor, max_gap=120, fill_edges=True, window=3)
+    # 5. Smooth trajectory and build a 100% STATIC (LOCKED) Union Rectangle across the entire clip
+    # so the crop window NEVER moves/wobbles following the face per-frame!
+    smoothed = smooth_head_trajectory(locked_actor, max_gap=120, fill_edges=True, window=5)
     head_boxes: list[tuple[int, int, int, int] | None] = [
         d["head_box"] if d is not None else None for d in smoothed
     ]
     present_boxes = [b for b in head_boxes if b is not None]
 
-    # Full head + back-of-head + hair dimensions + 8% feathering border margin so edges never clip hair
-    box_widths = [b[2] - b[0] for b in present_boxes]
-    box_heights = [b[3] - b[1] for b in present_boxes]
-    crop_w = min(width - (width % 2), max(128, int(round(np.percentile(box_widths, 90) * 1.08))))
-    crop_h = min(height - (height % 2), max(128, int(round(np.percentile(box_heights, 90) * 1.08))))
-    crop_w -= crop_w % 2
-    crop_h -= crop_h % 2
+    union_x1 = min(b[0] for b in present_boxes)
+    union_y1 = min(b[1] for b in present_boxes)
+    union_x2 = max(b[2] for b in present_boxes)
+    union_y2 = max(b[3] for b in present_boxes)
 
-    raw_centers = []
-    last_c = (width / 2.0, height / 2.0)
-    for b in head_boxes:
-        if b is not None:
-            last_c = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
-        raw_centers.append(last_c)
+    union_w = max(64, union_x2 - union_x1)
+    union_h = max(64, union_y2 - union_y1)
+    pad_x = max(18, int(round(union_w * 0.06)))
+    pad_y = max(18, int(round(union_h * 0.06)))
 
-    # Position the (crop_w, crop_h) rectangle on the actor's full head+hair center per frame
-    win = 3
-    crop_boxes = []
-    for i in range(frames_read):
-        sub = raw_centers[max(0, i - win // 2) : min(frames_read, i + win // 2 + 1)]
-        scx = float(np.mean([c[0] for c in sub]))
-        scy = float(np.mean([c[1] for c in sub]))
-        cx1 = int(round(scx - crop_w / 2.0))
-        cy1 = int(round(scy - crop_h / 2.0))
-        cx1 = max(0, min(width - crop_w, cx1))
-        cy1 = max(0, min(height - crop_h, cy1))
-        cx1 -= cx1 % 2
-        cy1 -= cy1 % 2
-        crop_boxes.append((cx1, cy1, cx1 + crop_w, cy1 + crop_h))
-    mode_desc = "full head + back-of-head + hair rectangle dengan feathering margin"
+    cx1 = max(0, union_x1 - pad_x)
+    cy1 = max(0, union_y1 - pad_y)
+    cx2 = min(width, union_x2 + pad_x)
+    cy2 = min(height, union_y2 + pad_y)
+    cx1 -= cx1 % 2
+    cy1 -= cy1 % 2
+    if (cx2 - cx1) % 2 != 0:
+        cx2 = cx2 + 1 if cx2 < width else cx2 - 1
+    if (cy2 - cy1) % 2 != 0:
+        cy2 = cy2 + 1 if cy2 < height else cy2 - 1
+
+    crop_w = max(64, cx2 - cx1)
+    crop_h = max(64, cy2 - cy1)
+    static_crop_box = (cx1, cy1, cx1 + crop_w, cy1 + crop_h)
+    crop_boxes = [static_crop_box] * frames_read
+    mode_desc = f"static locked rectangle ({cx1},{cy1})-({cx1 + crop_w},{cy1 + crop_h}) mencakup kepala + rambut dada/perut"
 
     # Pad frame count to LTX-2.5 requirement: (padded_N - 1) % 8 == 0
     padded_frames = align_up(frames_read)
@@ -549,6 +546,9 @@ def composite_crop_to_full_video(
     writer = VideoWriter(silent_tmp, orig_w, orig_h, Fraction(TARGET_FPS, 1))
 
     last_gen_frame: np.ndarray | None = None
+    diff_ema: np.ndarray | None = None
+    cached_alpha: np.ndarray | None = None
+    cached_cbox: tuple[int, int, int, int] | None = None
     idx = 0
     try:
         while idx < frame_count:
@@ -564,9 +564,9 @@ def composite_crop_to_full_video(
                 gen_frame = None
 
             hbox = head_boxes[idx] if idx < len(head_boxes) else None
-            cbox = crop_boxes[idx] if idx < len(crop_boxes) else None
+            cbox = crop_boxes[idx] if idx < len(crop_boxes) else (crop_boxes[-1] if crop_boxes else None)
 
-            if gen_frame is not None and hbox is not None and cbox is not None:
+            if gen_frame is not None and cbox is not None:
                 cx1, cy1, cx2, cy2 = cbox
                 cx1 = max(0, cx1)
                 cy1 = max(0, cy1)
@@ -580,17 +580,23 @@ def composite_crop_to_full_video(
                     if patch.shape[1] != cw or patch.shape[0] != ch:
                         patch = cv2.resize(patch, (cw, ch), interpolation=cv2.INTER_LANCZOS4)
 
-                    # Pure rectangular feathered mask (no ellipse clipping)
-                    alpha = create_crop_head_mask((cx1, cy1, cx2, cy2), hbox)
+                    # Pure rectangular feathered mask at fixed static coordinates
+                    cur_box = (cx1, cy1, cx2, cy2)
+                    if cached_alpha is None or cached_cbox != cur_box:
+                        cached_alpha = create_crop_head_mask(cur_box, hbox)
+                        cached_cbox = cur_box
+                    alpha = cached_alpha
+
                     orig_region = orig_frame[cy1:cy2, cx1:cx2].astype(np.float32)
                     patch_f32 = patch.astype(np.float32)
 
-                    # Gentle border-ring luminance/color harmonization along rectangle edge
+                    # Temporally smoothed border-ring luminance/color harmonization (zero flicker)
                     ring_mask = (alpha[:, :, 0] > 0.05) & (alpha[:, :, 0] < 0.45)
                     if np.count_nonzero(ring_mask) > 32:
                         diff = np.mean(orig_region[ring_mask] - patch_f32[ring_mask], axis=0)
                         diff = np.clip(diff, -14.0, 14.0)
-                        patch_f32 = np.clip(patch_f32 + diff, 0.0, 255.0)
+                        diff_ema = diff if diff_ema is None else (0.85 * diff_ema + 0.15 * diff)
+                        patch_f32 = np.clip(patch_f32 + diff_ema, 0.0, 255.0)
 
                     blended = orig_region * (1.0 - alpha) + patch_f32 * alpha
                     orig_frame = orig_frame.copy()
