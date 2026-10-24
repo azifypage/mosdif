@@ -323,7 +323,7 @@ def prepare_head_crop_video(
     detector = HeadDetector()
 
     # 2. Analyze source head photo hair extent (4 sides: left, top, right, bottom)
-    src_ratios = (0.0, 0.08, 0.0, 0.0)
+    src_ratios = (0.35, 0.48, 0.35, 0.18)
     if head_image_path is not None and Path(head_image_path).is_file():
         src_img = cv2.imread(str(head_image_path))
         if src_img is not None:
@@ -333,7 +333,9 @@ def prepare_head_crop_video(
                     src_cands,
                     key=lambda c: (c["face_box"][2] - c["face_box"][0]) * (c["face_box"][3] - c["face_box"][1]),
                 )
-                src_ratios = detector.estimate_hair_expansion_ratios(src_img, best_src["face_box"])
+                src_ratios = detector.estimate_hair_expansion_ratios(
+                    src_img, best_src["face_box"], landmarks=best_src.get("landmarks")
+                )
 
     if log_cb:
         log_cb(f"🔍 Mendeteksi wajah & mengunci 1 aktor utama pada video 24 FPS ({width}x{height})...")
@@ -370,14 +372,17 @@ def prepare_head_crop_video(
     # 3. Lock onto ONLY 1 primary actor across the entire video
     locked_actor = lock_single_actor_trajectory(all_frame_candidates, width, height)
 
-    # 4. Estimate tight 4-side hair extent (left, top, right, bottom) on sampled keyframes
-    target_left_list = [0.0]
-    target_top_list = [0.08]
-    target_right_list = [0.0]
-    target_bot_list = [0.0]
+    # 4. Estimate full head + back-of-head + hair extent (left, top, right, bottom) on sampled keyframes
+    target_left_list = [0.35]
+    target_top_list = [0.48]
+    target_right_list = [0.35]
+    target_bot_list = [0.18]
     for f_idx, f_img in sampled_frames.items():
         if f_idx < len(locked_actor) and locked_actor[f_idx] is not None:
-            lr, tr, rr, br = detector.estimate_hair_expansion_ratios(f_img, locked_actor[f_idx]["face_box"])
+            det_kf = locked_actor[f_idx]
+            lr, tr, rr, br = detector.estimate_hair_expansion_ratios(
+                f_img, det_kf["face_box"], landmarks=det_kf.get("landmarks")
+            )
             target_left_list.append(lr)
             target_top_list.append(tr)
             target_right_list.append(rr)
@@ -385,12 +390,12 @@ def prepare_head_crop_video(
 
     detector.close()
 
-    t_left = float(np.percentile(target_left_list, 75))
-    t_top = float(np.percentile(target_top_list, 75))
-    t_right = float(np.percentile(target_right_list, 75))
-    t_bot = float(np.percentile(target_bot_list, 75))
+    t_left = float(np.percentile(target_left_list, 90))
+    t_top = float(np.percentile(target_top_list, 90))
+    t_right = float(np.percentile(target_right_list, 90))
+    t_bot = float(np.percentile(target_bot_list, 90))
 
-    # Tight union of Target hair extent and Source photo hair extent (4 independent sides)
+    # Union of Target full-head/hair extent and Source photo head/hair extent (4 independent sides)
     final_ratios = (
         max(t_left, src_ratios[0]),
         max(t_top, src_ratios[1]),
@@ -399,17 +404,24 @@ def prepare_head_crop_video(
     )
     if log_cb:
         log_cb(
-            f"📐 Ekspansi Ketat Wajah+Rambut (Toleransi 6px): "
+            f"📐 Ekspansi Penuh Kepala+Belakang Kepala+Rambut (+Margin Feather): "
             f"Kiri=+{final_ratios[0]*100:.0f}%, Atas=+{final_ratios[1]*100:.0f}%, "
             f"Kanan=+{final_ratios[2]*100:.0f}%, Bawah=+{final_ratios[3]*100:.0f}%"
         )
 
-    # Apply the tight 4-side expansion ratios (+6px tolerance) to the locked actor in every frame
+    # Apply the 4-side expansion ratios + per-frame yaw back-of-head expansion to the locked actor
     for idx, det in enumerate(locked_actor):
         if det is not None:
             fx1, fy1, fx2, fy2 = det["face_box"]
             det["head_box"] = detector._expand_to_full_head(
-                fx1, fy1, fx2, fy2, width, height, ratios=final_ratios
+                fx1,
+                fy1,
+                fx2,
+                fy2,
+                width,
+                height,
+                ratios=final_ratios,
+                landmarks=det.get("landmarks"),
             )
 
     # 5. Zero-phase 3-frame centered smoothing (eliminates 1-frame jitter with ZERO lag)
@@ -419,11 +431,11 @@ def prepare_head_crop_video(
     ]
     present_boxes = [b for b in head_boxes if b is not None]
 
-    # Exact tight dimensions (no extra percentage padding, no min_side=256 inflation)
+    # Full head + back-of-head + hair dimensions + 8% feathering border margin so edges never clip hair
     box_widths = [b[2] - b[0] for b in present_boxes]
     box_heights = [b[3] - b[1] for b in present_boxes]
-    crop_w = min(width - (width % 2), max(32, int(round(np.percentile(box_widths, 80)))))
-    crop_h = min(height - (height % 2), max(32, int(round(np.percentile(box_heights, 80)))))
+    crop_w = min(width - (width % 2), max(128, int(round(np.percentile(box_widths, 90) * 1.08))))
+    crop_h = min(height - (height % 2), max(128, int(round(np.percentile(box_heights, 90) * 1.08))))
     crop_w -= crop_w % 2
     crop_h -= crop_h % 2
 
@@ -434,7 +446,7 @@ def prepare_head_crop_video(
             last_c = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0)
         raw_centers.append(last_c)
 
-    # Position the tight (crop_w, crop_h) rectangle directly on the actor's head+hair center per frame
+    # Position the (crop_w, crop_h) rectangle on the actor's full head+hair center per frame
     win = 3
     crop_boxes = []
     for i in range(frames_read):
@@ -448,7 +460,7 @@ def prepare_head_crop_video(
         cx1 -= cx1 % 2
         cy1 -= cy1 % 2
         crop_boxes.append((cx1, cy1, cx1 + crop_w, cy1 + crop_h))
-    mode_desc = "tight rectangle tepat di batas wajah+rambut (toleransi 6px)"
+    mode_desc = "full head + back-of-head + hair rectangle dengan feathering margin"
 
     # Pad frame count to LTX-2.5 requirement: (padded_N - 1) % 8 == 0
     padded_frames = align_up(frames_read)

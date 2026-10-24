@@ -1,8 +1,7 @@
-"""Head, Face & Hair detector, single-actor tracker, and tight rectangular mask generator.
+"""Head, Face & Full-Hair detector, single-actor tracker, and feathered rectangular mask generator.
 
-Computes a tight bounding rectangle strictly around (face + actual attached hair) with minimal
-pixel tolerance (~6 px), locks onto a single primary actor across the video, and generates
-rectangular masks with a thin feathered edge (4-8 px).
+Ensures the entire head (face, skull dome, ears, back of the head/cranium, and all hair)
+is comfortably inside the rectangle with proper breathing room and smooth edge feathering.
 """
 
 from __future__ import annotations
@@ -13,8 +12,8 @@ from pathlib import Path
 
 from mosaicdiff.geometry import edge_fade
 
-# Maximum pixel tolerance outside the detected (face + hair) boundary
-TIGHT_TOLERANCE_PX = 6
+# Comfortable pixel margin outside the detected (head + hair) boundary for feathering & context
+HEAD_PADDING_PX = 20
 
 
 class HeadDetector:
@@ -77,7 +76,7 @@ class HeadDetector:
         except Exception:
             pass
 
-        # Semantic silhouette segmentation for hair & upper-body contouring
+        # Semantic silhouette segmentation for hair & head contouring
         self._mp_selfie = None
         try:
             import mediapipe as mp
@@ -126,6 +125,22 @@ class HeadDetector:
         norm = np.linalg.norm(vec) + 1e-6
         return vec / norm
 
+    def _estimate_yaw_back_of_head(self, landmarks: np.ndarray | None, face_box: tuple[int, int, int, int]) -> tuple[float, float]:
+        """Estimate extra (left_extra, right_extra) ratios to cover the back of the head when turned."""
+        if landmarks is None or len(landmarks) < 3:
+            return (0.08, 0.08)
+        left_eye = landmarks[0]
+        right_eye = landmarks[1]
+        nose = landmarks[2]
+        eye_span = max(8.0, float( abs(right_eye[0] - left_eye[0]) ))
+        eye_mid_x = float((left_eye[0] + right_eye[0]) / 2.0)
+        # Positive offset -> nose shifted right in image -> back of head is on the LEFT
+        # Negative offset -> nose shifted left in image -> back of head is on the RIGHT
+        yaw_shift = ( float(nose[0]) - eye_mid_x ) / eye_span
+        left_extra = float(np.clip(max(0.05, yaw_shift * 0.65), 0.05, 0.45))
+        right_extra = float(np.clip(max(0.05, -yaw_shift * 0.65), 0.05, 0.45))
+        return (left_extra, right_extra)
+
     def detect_all_faces(
         self,
         frame_bgr: np.ndarray,
@@ -145,7 +160,9 @@ class HeadDetector:
                     fx1, fy1 = np.min(pts, axis=0)
                     fx2, fy2 = np.max(pts, axis=0)
                     fbox = (max(0, int(fx1)), max(0, int(fy1)), min(w, int(fx2)), min(h, int(fy2)))
-                    hbox = self._expand_to_full_head(fx1, fy1, fx2, fy2, w, h, ratios=expansion_ratios)
+                    hbox = self._expand_to_full_head(
+                        fx1, fy1, fx2, fy2, w, h, ratios=expansion_ratios, landmarks=landmarks
+                    )
                     sig = self._compute_face_signature(frame_bgr, fbox)
                     candidates.append(
                         {
@@ -189,7 +206,9 @@ class HeadDetector:
                             dtype=np.float32,
                         )
                     fbox = (fx1, fy1, fx2, fy2)
-                    hbox = self._expand_to_full_head(fx1, fy1, fx2, fy2, w, h, ratios=expansion_ratios)
+                    hbox = self._expand_to_full_head(
+                        fx1, fy1, fx2, fy2, w, h, ratios=expansion_ratios, landmarks=landmarks
+                    )
                     sig = self._compute_face_signature(frame_bgr, fbox)
                     candidates.append(
                         {
@@ -225,7 +244,9 @@ class HeadDetector:
                             dtype=np.float32,
                         )
                     fbox = (fx1, fy1, fx2, fy2)
-                    hbox = self._expand_to_full_head(fx1, fy1, fx2, fy2, w, h, ratios=expansion_ratios)
+                    hbox = self._expand_to_full_head(
+                        fx1, fy1, fx2, fy2, w, h, ratios=expansion_ratios, landmarks=landmarks
+                    )
                     emb = getattr(face, "normed_embedding", None)
                     if emb is not None:
                         sig = np.array(emb, dtype=np.float32)
@@ -263,7 +284,9 @@ class HeadDetector:
                     dtype=np.float32,
                 )
                 fbox = (fx1, fy1, fx2, fy2)
-                hbox = self._expand_to_full_head(fx1, fy1, fx2, fy2, w, h, ratios=expansion_ratios)
+                hbox = self._expand_to_full_head(
+                    fx1, fy1, fx2, fy2, w, h, ratios=expansion_ratios, landmarks=landmarks
+                )
                 sig = self._compute_face_signature(frame_bgr, fbox)
                 candidates.append(
                     {
@@ -283,7 +306,7 @@ class HeadDetector:
         need_mask: bool = True,
         expansion_ratios: tuple[float, float, float, float] | None = None,
     ) -> dict | None:
-        """Detect the primary head in a single frame with tight (face + hair) bounds."""
+        """Detect the primary head in a single frame covering face, cranium, back of head, and hair."""
         h, w = frame_bgr.shape[:2]
         candidates = self.detect_all_faces(frame_bgr, expansion_ratios=expansion_ratios)
         if not candidates:
@@ -294,9 +317,13 @@ class HeadDetector:
             key=lambda c: (c["face_box"][2] - c["face_box"][0]) * (c["face_box"][3] - c["face_box"][1]),
         )
         if expansion_ratios is None:
-            ratios = self.estimate_hair_expansion_ratios(frame_bgr, best["face_box"])
+            ratios = self.estimate_hair_expansion_ratios(
+                frame_bgr, best["face_box"], landmarks=best.get("landmarks")
+            )
             fx1, fy1, fx2, fy2 = best["face_box"]
-            best["head_box"] = self._expand_to_full_head(fx1, fy1, fx2, fy2, w, h, ratios=ratios)
+            best["head_box"] = self._expand_to_full_head(
+                fx1, fy1, fx2, fy2, w, h, ratios=ratios, landmarks=best.get("landmarks")
+            )
         if need_mask:
             seg_mask = self.get_person_segmentation(frame_bgr)
             best["mask"] = self._generate_head_mask(best["head_box"], None, w, h, seg_mask=seg_mask)
@@ -319,12 +346,16 @@ class HeadDetector:
         self,
         frame_bgr: np.ndarray,
         face_box: tuple[int, int, int, int],
+        landmarks: np.ndarray | None = None,
     ) -> tuple[float, float, float, float]:
-        """Estimate tight 4-side ratios (left_r, top_r, right_r, bottom_r) beyond face_box.
+        """Estimate 4-side ratios (left_r, top_r, right_r, bottom_r) beyond face_box to cover the ENTIRE head & hair.
 
-        Starts at (0.0, 0.08, 0.0, 0.0) — i.e., exact face_box edges when no hair extends
-        past the face on that side! Only expands a side when true hair pixels connected to
-        the scalp are detected on that specific side, stopping before torso clothing.
+        1. Starts with a full anatomical cranium base (top=0.48, sides=0.28 + yaw back-of-head offset, bottom=0.18)
+           so the skull dome, ears, and back of the head are ALWAYS inside the rectangle even when turned.
+        2. Above the chin/neck (y <= fy2 + 0.15*fh), uses the full person foreground silhouette
+           (SelfieSegmentation + background contrast) so any hair volume, bun, ponytail, or back-of-head hair
+           is 100% captured.
+        3. Below the chin (y > fy2 + 0.15*fh), tracks hair color downward if long hair hangs over shoulders/chest.
         """
         h, w = frame_bgr.shape[:2]
         fx1, fy1, fx2, fy2 = face_box
@@ -332,15 +363,16 @@ class HeadDetector:
         fh = max(12.0, float(fy2 - fy1))
         cx = (fx1 + fx2) / 2.0
 
-        # Tight defaults: 0.0 on left, right, and bottom (exact face edge), 0.08 on top
-        left_r = 0.0
-        top_r = 0.08
-        right_r = 0.0
-        bot_r = 0.0
+        # Yaw-aware anatomical base: ensures skull dome, ears, and back of head are always included
+        yaw_left, yaw_right = self._estimate_yaw_back_of_head(landmarks, face_box)
+        left_r = 0.28 + yaw_left
+        top_r = 0.48
+        right_r = 0.28 + yaw_right
+        bot_r = 0.18
 
-        sx1 = max(0, int(round(cx - fw * 1.45)))
-        sx2 = min(w, int(round(cx + fw * 1.45)))
-        sy1 = max(0, int(round(fy1 - fh * 0.75)))
+        sx1 = max(0, int(round(cx - fw * 1.60)))
+        sx2 = min(w, int(round(cx + fw * 1.60)))
+        sy1 = max(0, int(round(fy1 - fh * 0.90)))
         sy2 = min(h, int(round(fy2 + fh * 2.50)))
 
         if sx2 - sx1 < 16 or sy2 - sy1 < 16:
@@ -348,7 +380,59 @@ class HeadDetector:
 
         lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-        # 1. Sample central face skin color
+        # Sample background from top-left and top-right corners of search window
+        bw_strip = max(4, (sx2 - sx1) // 10)
+        bh_strip = max(4, (sy2 - sy1) // 12)
+        bg_left = lab[sy1 : sy1 + bh_strip, sx1 : sx1 + bw_strip].reshape(-1, 3)
+        bg_right = lab[sy1 : sy1 + bh_strip, sx2 - bw_strip : sx2].reshape(-1, 3)
+        bg_all = np.concatenate([b for b in (bg_left, bg_right) if b.size > 0], axis=0)
+        bg_median = np.median(bg_all, axis=0) if len(bg_all) > 0 else np.array([0.0, 128.0, 128.0])
+        bg_std = np.clip(np.std(bg_all, axis=0), 8.0, 28.0) if len(bg_all) > 0 else np.array([15.0, 15.0, 15.0])
+
+        roi_lab = lab[sy1:sy2, sx1:sx2]
+        dist_bg = np.linalg.norm((roi_lab - bg_median) / (bg_std * 1.3), axis=2)
+
+        seg = self.get_person_segmentation(frame_bgr)
+        seg_roi = seg[sy1:sy2, sx1:sx2] if seg is not None else None
+
+        # PART A: Upper head & back-of-head zone (from top of search box down to chin level fy2 + 0.10*fh)
+        # Everything in the foreground silhouette above chin level IS the head/cranium/hair!
+        chin_y_rel = min(sy2 - sy1, max(1, int(round(fy2 + fh * 0.10)) - sy1))
+        if seg_roi is not None:
+            upper_fg = (seg_roi[:chin_y_rel, :] > 0.38) & (dist_bg[:chin_y_rel, :] > 1.25)
+        else:
+            upper_fg = dist_bg[:chin_y_rel, :] > 1.85
+
+        upper_u8 = upper_fg.astype(np.uint8) * 255
+        k_upper = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        upper_u8 = cv2.morphologyEx(upper_u8, cv2.MORPH_CLOSE, k_upper)
+        upper_u8 = cv2.morphologyEx(upper_u8, cv2.MORPH_OPEN, k_upper)
+
+        # Keep connected component overlapping the face/cranium
+        n_lbl, lbls, stats, _ = cv2.connectedComponentsWithStats(upper_u8, connectivity=8)
+        f_rx1 = max(0, int(fx1 - fw * 0.35) - sx1)
+        f_rx2 = min(sx2 - sx1, int(fx2 + fw * 0.35) - sx1)
+        f_ry1 = max(0, int(fy1 - fh * 0.45) - sy1)
+        f_ry2 = min(chin_y_rel, int(fy2) - sy1)
+
+        head_upper = np.zeros_like(upper_u8)
+        if f_rx2 > f_rx1 and f_ry2 > f_ry1:
+            seed_ids = set(np.unique(lbls[f_ry1:f_ry2, f_rx1:f_rx2])) - {0}
+            for lid in seed_ids:
+                if stats[lid, cv2.CC_STAT_AREA] >= 36:
+                    head_upper[lbls == lid] = 255
+
+        u_ys, u_xs = np.where(head_upper > 0)
+        if len(u_ys) > 30:
+            u_min_y = float(np.percentile(u_ys, 2)) + sy1
+            u_min_x = float(np.percentile(u_xs, 2)) + sx1
+            u_max_x = float(np.percentile(u_xs, 98)) + sx1
+
+            left_r = float(np.clip(max(left_r, (fx1 - u_min_x) / fw + 0.06), 0.28, 1.15))
+            top_r = float(np.clip(max(top_r, (fy1 - u_min_y) / fh + 0.08), 0.48, 1.10))
+            right_r = float(np.clip(max(right_r, (u_max_x - fx2) / fw + 0.06), 0.28, 1.15))
+
+        # PART B: Long hair extending below the chin (from fy1 down to sy2)
         skin_x1 = max(0, int(fx1 + fw * 0.22))
         skin_x2 = min(w, int(fx2 - fw * 0.22))
         skin_y1 = max(0, int(fy1 + fh * 0.20))
@@ -356,99 +440,64 @@ class HeadDetector:
         skin_patch = lab[skin_y1:skin_y2, skin_x1:skin_x2]
         skin_mean = np.mean(skin_patch, axis=(0, 1)) if skin_patch.size > 0 else np.array([150.0, 135.0, 140.0])
 
-        # 2. Sample scalp/crown hair strip right above forehead
-        crown_y1 = max(0, int(fy1 - fh * 0.28))
-        crown_y2 = max(crown_y1 + 2, int(fy1 - fh * 0.02))
-        crown_x1 = max(0, int(fx1 + fw * 0.12))
-        crown_x2 = min(w, int(fx2 - fw * 0.12))
-        crown_patch = lab[crown_y1:crown_y2, crown_x1:crown_x2]
-        if crown_patch.size == 0:
-            return (left_r, top_r, right_r, bot_r)
+        # Sample hair pixels from the detected upper head region outside the inner face box
+        upper_hair_mask = head_upper > 0
+        inner_fx1 = max(0, int(fx1) - sx1)
+        inner_fx2 = min(sx2 - sx1, int(fx2) - sx1)
+        inner_fy1 = max(0, int(fy1) - sy1)
+        inner_fy2 = min(chin_y_rel, int(fy2) - sy1)
+        if inner_fx2 > inner_fx1 and inner_fy2 > inner_fy1:
+            upper_hair_mask[inner_fy1:inner_fy2, inner_fx1:inner_fx2] = False
 
-        # 3. Sample outer background from top corners of search ROI
-        bw_strip = max(4, (sx2 - sx1) // 10)
-        bh_strip = max(4, (sy2 - sy1) // 12)
-        bg_left = lab[sy1 : sy1 + bh_strip, sx1 : sx1 + bw_strip].reshape(-1, 3)
-        bg_right = lab[sy1 : sy1 + bh_strip, sx2 - bw_strip : sx2].reshape(-1, 3)
-        bg_all = np.concatenate([b for b in (bg_left, bg_right) if b.size > 0], axis=0)
-        bg_median = np.median(bg_all, axis=0) if len(bg_all) > 0 else np.array([0.0, 128.0, 128.0])
+        hair_pixels = roi_lab[:chin_y_rel, :][upper_hair_mask]
+        if len(hair_pixels) >= 24:
+            dist_hp_skin = np.linalg.norm(hair_pixels - skin_mean, axis=1)
+            valid_hp = hair_pixels[dist_hp_skin > 15.0]
+            if len(valid_hp) >= 16:
+                hair_median = np.median(valid_hp, axis=0)
+                hair_std = np.clip(np.std(valid_hp, axis=0), 9.0, 26.0)
+                dist_hair = np.linalg.norm((roi_lab - hair_median) / (hair_std * 1.45), axis=2)
+                dist_skin = np.linalg.norm(roi_lab - skin_mean, axis=2)
 
-        crown_flat = crown_patch.reshape(-1, 3)
-        dist_crown_skin = np.linalg.norm(crown_flat - skin_mean, axis=1)
-        dist_crown_bg = np.linalg.norm(crown_flat - bg_median, axis=1)
-        valid_hair_samples = crown_flat[(dist_crown_skin > 18.0) & (dist_crown_bg > 22.0)]
+                full_hair = (dist_hair < 1.55) & (dist_skin > 16.0) & (dist_bg > 1.35)
+                if seg_roi is not None:
+                    full_hair = full_hair & (seg_roi > 0.45)
 
-        # If no distinct hair pixels exist above the forehead, return tight face box ratios
-        if len(valid_hair_samples) < max(12, int(crown_flat.shape[0] * 0.15)):
-            return (left_r, top_r, right_r, bot_r)
+                # Exclude central throat/chest directly below chin so shirt is not merged with hair
+                neck_x1 = max(0, int(fx1 + fw * 0.16) - sx1)
+                neck_x2 = min(sx2 - sx1, int(fx2 - fw * 0.16) - sx1)
+                neck_y1 = max(0, int(fy2 + fh * 0.08) - sy1)
+                if neck_x2 > neck_x1 and neck_y1 < (sy2 - sy1):
+                    full_hair[neck_y1:, neck_x1:neck_x2] = False
 
-        hair_median = np.median(valid_hair_samples, axis=0)
-        hair_std = np.clip(np.std(valid_hair_samples, axis=0), 8.0, 24.0)
+                fh_u8 = full_hair.astype(np.uint8) * 255
+                fh_u8 = cv2.morphologyEx(fh_u8, cv2.MORPH_CLOSE, k_upper)
+                num_l, l_map, l_stats, _ = cv2.connectedComponentsWithStats(fh_u8, connectivity=8)
 
-        roi_lab = lab[sy1:sy2, sx1:sx2]
-        dist_hair = np.linalg.norm((roi_lab - hair_median) / (hair_std * 1.35), axis=2)
-        dist_bg = np.linalg.norm(roi_lab - bg_median, axis=2)
-        dist_skin = np.linalg.norm(roi_lab - skin_mean, axis=2)
+                conn_hair = np.zeros_like(fh_u8)
+                seed_hair_ids = set(np.unique(l_map[:chin_y_rel, :][head_upper > 0])) - {0}
+                for lid in seed_hair_ids:
+                    if l_stats[lid, cv2.CC_STAT_AREA] >= 40:
+                        conn_hair[l_map == lid] = 255
 
-        hair_mask = (dist_hair < 1.45) & (dist_skin > 18.0) & (dist_bg > 24.0)
+                # Stop downward expansion if width jumps to full torso/shirt width
+                for r_y in range(chin_y_rel, conn_hair.shape[0]):
+                    row_xs = np.where(conn_hair[r_y, :] > 0)[0]
+                    if len(row_xs) == 0:
+                        conn_hair[r_y:, :] = 0
+                        break
+                    if float(row_xs[-1] - row_xs[0]) > fw * 1.55:
+                        conn_hair[r_y:, :] = 0
+                        break
 
-        # Intersect with person silhouette if available
-        seg = self.get_person_segmentation(frame_bgr)
-        if seg is not None:
-            seg_roi = seg[sy1:sy2, sx1:sx2]
-            hair_mask = hair_mask & (seg_roi > 0.55)
-
-        # Exclude central neck/chest zone directly under the chin so dark shirts are not merged
-        neck_x1 = max(0, int(fx1 + fw * 0.18) - sx1)
-        neck_x2 = min(sx2 - sx1, int(fx2 - fw * 0.18) - sx1)
-        neck_y1 = max(0, int(fy2 + fh * 0.05) - sy1)
-        if neck_x2 > neck_x1 and neck_y1 < (sy2 - sy1):
-            hair_mask[neck_y1:, neck_x1:neck_x2] = False
-
-        hair_u8 = hair_mask.astype(np.uint8) * 255
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        hair_u8 = cv2.morphologyEx(hair_u8, cv2.MORPH_OPEN, kernel)
-        hair_u8 = cv2.morphologyEx(hair_u8, cv2.MORPH_CLOSE, kernel)
-
-        # Keep only components connected to the scalp seed right around the upper head
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(hair_u8, connectivity=8)
-        seed_x1 = max(0, int(fx1 - fw * 0.20) - sx1)
-        seed_x2 = min(sx2 - sx1, int(fx2 + fw * 0.20) - sx1)
-        seed_y1 = max(0, int(fy1 - fh * 0.35) - sy1)
-        seed_y2 = min(sy2 - sy1, int(fy1 + fh * 0.35) - sy1)
-
-        connected = np.zeros_like(hair_u8)
-        if seed_x2 > seed_x1 and seed_y2 > seed_y1:
-            seed_labels = set(np.unique(labels[seed_y1:seed_y2, seed_x1:seed_x2])) - {0}
-            for lbl in seed_labels:
-                if stats[lbl, cv2.CC_STAT_AREA] >= 30:
-                    connected[labels == lbl] = 255
-
-        # Prevent downward bleeding into dark torso clothing: check row width below chin
-        chin_rel_y = max(0, int(fy2 - sy1))
-        for r_y in range(chin_rel_y, connected.shape[0]):
-            row_xs = np.where(connected[r_y, :] > 0)[0]
-            if len(row_xs) == 0:
-                connected[r_y:, :] = 0
-                break
-            row_span = float(row_xs[-1] - row_xs[0])
-            # If width suddenly jumps to torso/shoulder width (> 1.45 * fw), cut off at collar
-            if row_span > fw * 1.45:
-                connected[r_y:, :] = 0
-                break
-
-        ys, xs = np.where(connected > 0)
-        if len(ys) > 24:
-            # 5th and 95th percentiles for tight, outlier-free hair boundary (0% extra padding)
-            min_y = float(np.percentile(ys, 5)) + sy1
-            max_y = float(np.percentile(ys, 95)) + sy1
-            min_x = float(np.percentile(xs, 5)) + sx1
-            max_x = float(np.percentile(xs, 95)) + sx1
-
-            left_r = float(np.clip(max(0.0, (fx1 - min_x) / fw), 0.0, 0.90))
-            top_r = float(np.clip(max(0.08, (fy1 - min_y) / fh), 0.08, 0.85))
-            right_r = float(np.clip(max(0.0, (max_x - fx2) / fw), 0.0, 0.90))
-            bot_r = float(np.clip(max(0.0, (max_y - fy2) / fh), 0.0, 2.20))
+                h_ys, h_xs = np.where(conn_hair > 0)
+                if len(h_ys) > 30:
+                    max_y = float(np.percentile(h_ys, 96)) + sy1
+                    min_x = float(np.percentile(h_xs, 3)) + sx1
+                    max_x = float(np.percentile(h_xs, 97)) + sx1
+                    bot_r = float(np.clip(max(bot_r, (max_y - fy2) / fh + 0.08), 0.18, 2.30))
+                    left_r = float(np.clip(max(left_r, (fx1 - min_x) / fw + 0.06), 0.28, 1.20))
+                    right_r = float(np.clip(max(right_r, (max_x - fx2) / fw + 0.06), 0.28, 1.20))
 
         return (left_r, top_r, right_r, bot_r)
 
@@ -461,26 +510,32 @@ class HeadDetector:
         frame_w: int,
         frame_h: int,
         ratios: tuple[float, ...] | None = None,
-        tolerance_px: int = TIGHT_TOLERANCE_PX,
+        landmarks: np.ndarray | None = None,
+        padding_px: int = HEAD_PADDING_PX,
     ) -> tuple[int, int, int, int]:
-        """Expand face box strictly by the 4-side hair ratios plus a tiny pixel tolerance (~6 px)."""
+        """Expand face box to cover full skull, back of head, and hair with comfortable feathering margin."""
         fw = fx2 - fx1
         fh = fy2 - fy1
+        yaw_left, yaw_right = self._estimate_yaw_back_of_head(landmarks, (int(fx1), int(fy1), int(fx2), int(fy2)))
 
         if ratios is None:
-            left_r, top_r, right_r, bot_r = (0.0, 0.08, 0.0, 0.0)
+            left_r, top_r, right_r, bot_r = (0.28 + yaw_left, 0.48, 0.28 + yaw_right, 0.18)
         elif len(ratios) == 4:
-            left_r, top_r, right_r, bot_r = ratios
+            left_r = max(ratios[0], 0.28 + yaw_left)
+            top_r = max(ratios[1], 0.48)
+            right_r = max(ratios[2], 0.28 + yaw_right)
+            bot_r = max(ratios[3], 0.18)
         else:
-            # Backwards-compatible fallback if 3-tuple (top, bot, side_from_center) was passed
-            top_r, bot_r, side_c = ratios[0], ratios[1], ratios[2]
-            left_r = max(0.0, side_c - 0.5)
-            right_r = max(0.0, side_c - 0.5)
+            top_r = max(ratios[0], 0.48)
+            bot_r = max(ratios[1], 0.18)
+            side_c = max(ratios[2] - 0.5, 0.28)
+            left_r = side_c + yaw_left
+            right_r = side_c + yaw_right
 
-        hx1 = max(0, int(round(fx1 - fw * left_r)) - tolerance_px)
-        hy1 = max(0, int(round(fy1 - fh * top_r)) - tolerance_px)
-        hx2 = min(frame_w, int(round(fx2 + fw * right_r)) + tolerance_px)
-        hy2 = min(frame_h, int(round(fy2 + fh * bot_r)) + tolerance_px)
+        hx1 = max(0, int(round(fx1 - fw * left_r)) - padding_px)
+        hy1 = max(0, int(round(fy1 - fh * top_r)) - padding_px)
+        hx2 = min(frame_w, int(round(fx2 + fw * right_r)) + padding_px)
+        hy2 = min(frame_h, int(round(fy2 + fh * bot_r)) + padding_px)
 
         return (hx1, hy1, hx2, hy2)
 
@@ -492,7 +547,7 @@ class HeadDetector:
         frame_h: int,
         seg_mask: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Create a tight feathered 2D float32 rectangular mask (0.0 to 1.0) covering head_box."""
+        """Create a smooth feathered 2D float32 rectangular mask (0.0 to 1.0) covering head_box."""
         hx1, hy1, hx2, hy2 = head_box
         hx1, hy1 = max(0, hx1), max(0, hy1)
         hx2, hy2 = min(frame_w, hx2), min(frame_h, hy2)
@@ -501,7 +556,7 @@ class HeadDetector:
 
         mask = np.zeros((frame_h, frame_w), dtype=np.float32)
         short = min(hw, hh)
-        falloff = max(4, min(8, short // 12))
+        falloff = max(18, min(round(short * 0.10), short // 5))
         rect_fade = edge_fade(hh, hw, falloff)[:, :, 0]
         mask[hy1:hy2, hx1:hx2] = rect_fade
         return np.clip(mask, 0.0, 1.0)
@@ -511,12 +566,12 @@ def create_crop_head_mask(
     crop_box: tuple[int, int, int, int],
     head_box: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
-    """Create a tight rectangular feathered 3D float32 mask (H_crop, W_crop, 1) with 4-8 px border fade."""
+    """Create a rectangular feathered 3D float32 mask (H_crop, W_crop, 1) with smooth edge feathering."""
     cx1, cy1, cx2, cy2 = crop_box
     cw = max(2, cx2 - cx1)
     ch = max(2, cy2 - cy1)
     short = min(cw, ch)
-    falloff = max(4, min(8, short // 12))
+    falloff = max(18, min(round(short * 0.10), short // 5))
     return edge_fade(ch, cw, falloff)
 
 

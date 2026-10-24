@@ -127,12 +127,13 @@ def process_video(
         if not present:
             raise RuntimeError(f"Tidak ditemukan wajah/kepala pada video {source.name}")
 
-        # Keep head_boxes tight (no extra expand_box inflation)
-        grown = list(head_boxes)
-        x1 = max(0, min(b[0] for b in present))
-        y1 = max(0, min(b[1] for b in present))
-        x2 = min(width, max(b[2] for b in present))
-        y2 = min(height, max(b[3] for b in present))
+        # Expand slightly (+6% margin) around head_boxes for smooth rectangular feathering border
+        grown = [expand_box(box, 0.06, width, height) if box is not None else None for box in head_boxes]
+        present_grown = [b for b in grown if b is not None]
+        x1 = max(0, min(b[0] for b in present_grown))
+        y1 = max(0, min(b[1] for b in present_grown))
+        x2 = min(width, max(b[2] for b in present_grown))
+        y2 = min(height, max(b[3] for b in present_grown))
         x1 -= x1 % 2
         y1 -= y1 % 2
         if (x2 - x1) % 2 != 0:
@@ -140,7 +141,7 @@ def process_video(
         if (y2 - y1) % 2 != 0:
             y2 = y2 + 1 if y2 < height else y2 - 1
         crop = (x1, y1, x2, y2)
-        log(f"LTX-2.5 Tight Head+Hair Rectangle {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]} (24 FPS)")
+        log(f"LTX-2.5 Full Head+Hair Rectangle {crop[2] - crop[0]}x{crop[3] - crop[1]} at {crop[0]},{crop[1]} (24 FPS)")
 
         _h3(source_24, comp_path, destination, settings, crop, head_boxes, grown, float(TARGET_FPS), log, progress, cancel)
     finally:
@@ -175,7 +176,7 @@ def _detect_and_composite(
     sample_stride = max(1, (count or 120) // 16)
     seen = 0
 
-    src_ratios = (0.0, 0.08, 0.0, 0.0)
+    src_ratios = (0.35, 0.48, 0.35, 0.18)
     src_img = cv2.imread(str(head_path))
     if src_img is not None:
         src_cands = detector.detect_all_faces(src_img)
@@ -184,7 +185,9 @@ def _detect_and_composite(
                 src_cands,
                 key=lambda c: (c["face_box"][2] - c["face_box"][0]) * (c["face_box"][3] - c["face_box"][1]),
             )
-            src_ratios = detector.estimate_hair_expansion_ratios(src_img, best_src["face_box"])
+            src_ratios = detector.estimate_hair_expansion_ratios(
+                src_img, best_src["face_box"], landmarks=best_src.get("landmarks")
+            )
 
     log(f"Mendeteksi wajah & mengunci 1 aktor pada seluruh frame video 24 FPS ({count} frames)...")
     try:
@@ -208,29 +211,39 @@ def _detect_and_composite(
 
     locked = lock_single_actor_trajectory(all_candidates, width, height)
 
-    target_left = [0.0]
-    target_top = [0.08]
-    target_right = [0.0]
-    target_bot = [0.0]
+    target_left = [0.35]
+    target_top = [0.48]
+    target_right = [0.35]
+    target_bot = [0.18]
     for f_idx, f_img in sampled_frames.items():
         if f_idx < len(locked) and locked[f_idx] is not None:
-            lr, tr, rr, br = detector.estimate_hair_expansion_ratios(f_img, locked[f_idx]["face_box"])
+            det_kf = locked[f_idx]
+            lr, tr, rr, br = detector.estimate_hair_expansion_ratios(
+                f_img, det_kf["face_box"], landmarks=det_kf.get("landmarks")
+            )
             target_left.append(lr)
             target_top.append(tr)
             target_right.append(rr)
             target_bot.append(br)
 
     final_ratios = (
-        max(float(np.percentile(target_left, 75)), src_ratios[0]),
-        max(float(np.percentile(target_top, 75)), src_ratios[1]),
-        max(float(np.percentile(target_right, 75)), src_ratios[2]),
-        max(float(np.percentile(target_bot, 75)), src_ratios[3]),
+        max(float(np.percentile(target_left, 90)), src_ratios[0]),
+        max(float(np.percentile(target_top, 90)), src_ratios[1]),
+        max(float(np.percentile(target_right, 90)), src_ratios[2]),
+        max(float(np.percentile(target_bot, 90)), src_ratios[3]),
     )
     for det in locked:
         if det is not None:
             fx1, fy1, fx2, fy2 = det["face_box"]
             det["head_box"] = detector._expand_to_full_head(
-                fx1, fy1, fx2, fy2, width, height, ratios=final_ratios
+                fx1,
+                fy1,
+                fx2,
+                fy2,
+                width,
+                height,
+                ratios=final_ratios,
+                landmarks=det.get("landmarks"),
             )
 
     log("Menghaluskan lintasan 1 aktor (zero-lag 3-frame filter)...")
